@@ -20,7 +20,7 @@ operators to python so you can call each operator and check input and output.
 ## Install
 
 ```bash
-git clone [TODO: update when porting to github]
+git clone https://github.com/Pico-Developer/pySecureMR
 cd pySecureMR
 pip3 install -e "."
 ```
