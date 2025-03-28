@@ -25,7 +25,8 @@ except ImportError as e:
     print('\033[91m' + f"ImportError! Are you forget to set LD_LIBRARY_PATH to {bindings_path}?" + '\033[0m')
     LD_LIBRARY_PATH_IS_SET = False
 
-from .qnn import QnnModel
-
+from .qnn_model import QnnModel
+from .pytorch_to_qnn import pytorch_to_qnn
+from .utils import TORCH_INSTALLED
 
 __version__ = "0.0.1"

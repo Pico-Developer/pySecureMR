@@ -1,11 +1,12 @@
-<p align="center">
-    <a  alt="python version">
-        <img src="https://img.shields.io/badge/python-3.10-blue?logo=python" /></a>
-    <a> <img src="https://img.shields.io/badge/secure-mr-green" /></a>
-    <a> <img src="https://img.shields.io/badge/os-linux-yellow" /></a>
-</p>
-
 # pySecureMR
+
+<p align="center">
+  <a  alt="python version">
+      <img src="https://img.shields.io/badge/python-3.10-blue?logo=python" /></a>
+  <a> <img src="https://img.shields.io/badge/secure-mr-green" /></a>
+  <a> <img src="https://img.shields.io/badge/os-linux-yellow" /></a>
+  <a> <img src="https://img.shields.io/badge/os-windows(wsl2)-yellow" /></a>
+</p>
 
 Python bindings for [SecureMR](https://path-to-SecureMR-link) project.
 
@@ -20,9 +21,6 @@ operators to python so you can call each operator and check input and output.
 - Linux (ubuntu22): YES
 - Windows (wsl2, ubuntu22): YES
 - Mac: NO
-
-## Supported python
-- 3.10
 
 ## Install
 

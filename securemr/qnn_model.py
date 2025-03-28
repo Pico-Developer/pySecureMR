@@ -24,12 +24,12 @@ from pathlib import Path
 import subprocess
 import tempfile
 import json
+from .utils import DEBUG_QNN, TORCH_INSTALLED
+if TORCH_INSTALLED:
+    import torch
 
-try:
-    import ppadb
-    from ppadb.client import Client as AdbClient
-except ModuleNotFoundError as e:
-    ppadb = None
+import ppadb
+from ppadb.client import Client as AdbClient
 
 
 def get_output_node_ids(context_binary: str, QNN_SDK_ROOT: str) -> List[str]:
@@ -93,7 +93,11 @@ class QnnModel:
         assert target in target_list
         target_names = ["x86_64-linux-clang", "aarch64-android"]
         self.target = target_names[target_list.index(target)]
-        self.context_binary = context_binary
+
+        self.temp_dir = tempfile.mkdtemp()
+        cache_context_binary = os.path.join(self.temp_dir, os.path.basename(context_binary))
+        shutil.copy(context_binary, cache_context_binary)
+        self.context_binary = cache_context_binary
         if output_node_ids is None:
             self.output_node_ids = get_output_node_ids(context_binary, self.QNN_SDK_ROOT)
         else:
@@ -112,6 +116,10 @@ class QnnModel:
             self.binfile, self.cpu_libraries, self.dsp_libraries = self.sampleapp_build()
         else:
             pass
+    
+    def __del__(self):
+        if os.path.exists(self.temp_dir) and (not DEBUG_QNN):
+            shutil.rmtree(self.temp_dir)
     
     def __call__(self, x, is_nhwc=False):
         assert x.ndim == 4
@@ -147,13 +155,14 @@ class QnnModel:
             res = []
             for output_node_id in self.output_node_ids:
                 output_file = f"{output_node_id}.raw"
-                if not output_node_id.startswith("_"):
-                    output_file = f"_{output_file}"
                 preds = []
                 for cnt in range(x.shape[0]):
                     output_raw_file = os.path.join(output_dir, f"Result_{cnt}/{output_file}")
-                    logits = np.fromfile(output_raw_file, dtype=np.float32)
-                    preds.append(logits)
+                    if not os.path.exists(output_raw_file):
+                        output_file = f"_{output_file}"
+                        output_raw_file = os.path.join(output_dir, f"Result_{cnt}/{output_file}")
+                    assert os.path.exists(output_raw_file), f"{output_raw_file} not exists."
+                    preds.append(np.fromfile(output_raw_file, dtype=np.float32))
                 if is_numpy:
                     res.append(np.asarray(preds, dtype=np.float32))
                 else:
