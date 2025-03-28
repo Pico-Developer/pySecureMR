@@ -10,6 +10,15 @@
 
 Python bindings for [SecureMR](https://path-to-SecureMR-link) project.
 
+## Table of Contents
+
+  * [Why pySecureMR](#why-pysecuremr)
+  * [Supported platform](#supported-platform)
+  * [Install](#install)
+     * [Pip](#pip)
+     * [Manual install](#manual-install)
+  * [Run test](#run-test)
+
 ## Why pySecureMR?
 
 When developing a SecureMR app, it's not very easy to debug pipeline.
@@ -24,6 +33,7 @@ operators to python so you can call each operator and check input and output.
 
 ## Install
 
+### Manual install
 ```bash
 git clone https://github.com/Pico-Developer/pySecureMR
 cd pySecureMR
@@ -34,6 +44,10 @@ Check installation:
 source ./env
 python3 -c "import securemr"
 ```
+
+### Pip
+
+TODO
 
 ## Run test
 
