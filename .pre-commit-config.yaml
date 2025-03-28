@@ -37,6 +37,30 @@ repos:
         entry: check-docstring-first
         language: system
         types: [python]
+# -   repo: https://github.com/Quantco/pre-commit-mirrors-insert-license
+-   repo: local
+    hooks:
+    -   id: insert-license
+        name: Insert license header
+        entry: insert-license
+        args:
+        - --license-base64
+        - "Q29weXJpZ2h0IChjKSAyMDI1IEJ5dGVkYW5jZSBMdGQuIGFuZC9vciBpdHMgYWZmaWxpYXRlcwoK
+          TGljZW5zZWQgdW5kZXIgdGhlIEFwYWNoZSBMaWNlbnNlLCBWZXJzaW9uIDIuMCAodGhlIExpY2Vu
+          c2UpOwp5b3UgbWF5IG5vdCB1c2UgdGhpcyBmaWxlIGV4Y2VwdCBpbiBjb21wbGlhbmNlIHdpdGgg
+          dGhlIExpY2Vuc2UuCllvdSBtYXkgb2J0YWluIGEgY29weSBvZiB0aGUgTGljZW5zZSBhdAoKICAg
+          IGh0dHA6Ly93d3cuYXBhY2hlLm9yZy9saWNlbnNlcy9MSUNFTlNFLTIuMAoKVW5sZXNzIHJlcXVp
+          cmVkIGJ5IGFwcGxpY2FibGUgbGF3IG9yIGFncmVlZCB0byBpbiB3cml0aW5nLCBzb2Z0d2FyZQpk
+          aXN0cmlidXRlZCB1bmRlciB0aGUgTGljZW5zZSBpcyBkaXN0cmlidXRlZCBvbiBhbiBBUyBJUyBC
+          QVNJUywKV0lUSE9VVCBXQVJSQU5USUVTIE9SIENPTkRJVElPTlMgT0YgQU5ZIEtJTkQsIGVpdGhl
+          ciBleHByZXNzIG9yIGltcGxpZWQuClNlZSB0aGUgTGljZW5zZSBmb3IgdGhlIHNwZWNpZmljIGxh
+          bmd1YWdlIGdvdmVybmluZyBwZXJtaXNzaW9ucyBhbmQKbGltaXRhdGlvbnMgdW5kZXIgdGhlIExp
+          Y2Vuc2UuCg=="
+        - --dynamic-years
+        - --comment-style
+        - "#"
+        language: system
+        types: [python]
 # -   repo: local
 #     hooks:
 #     -   id: autoflake
@@ -55,14 +79,14 @@ repos:
     hooks:
     -   id: black
         name: Auto format python code.
-        entry: black -l 79
+        entry: black -l 119
         language: system
         types: [python]
 -   repo: local
     hooks:
     -   id: flake8
         name: Check pep8.
-        entry: flake8
+        entry: flake8 --max-line-length 119
         language: system
         types: [python]
 -   repo: local
@@ -79,5 +103,5 @@ repos:
         name: Check static typing.
         entry: mypy
         language: system
-        exclude: (?x)(^tests/|^projects/|^configs/|^dev/|^tools/|^plugins/)
+        exclude: (?x)(^tests/|^projects/|^configs/|^dev/|^tools/|/)
         types: [python]

@@ -42,7 +42,6 @@ pip3 install -e "."
 ```
 Check installation:
 ```bash
-source ./env
 python3 -c "import securemr"
 ```
 
@@ -53,7 +52,6 @@ TODO
 ## Run test
 
 ```bash
-source ./env
 pytest
 ```
 Refer to [test code](./tests) to learn more about the usage.
@@ -92,3 +90,5 @@ Refer to [test code](./tests) to learn more about the usage.
 | 31  | UPDATE_GLTF                  | ❌     |
 | 32  | RENDER_TEXT                  | ❌     |
 | 33  | UPLOAD_TEXTURE_TO_GLTF       | ❌     |
+
+

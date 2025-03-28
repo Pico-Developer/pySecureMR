@@ -26,18 +26,20 @@ test = [
   "pytest-repeat",
   "pytest-watch",
   "mypy==0.910",
+  "toml",
 ]
 dev = [
   "pre-commit>=2.13.0",
   "pre-commit-hooks>=4.0.1",
   "isort==5.6.4",
-  "flake8==3.9.2",
+  "flake8-pyproject",
   "flake8-bugbear==21.4.3",
   "flake8-comprehensions==3.6.0",
   "autoflake==1.4",
   "black==22.3.0",
   "pydocstyle==6.1.1",
   "pep8-naming==0.12.1",
+  "mypy",
 ]
 
 [[project.authors]]
@@ -80,7 +82,7 @@ exclude_lines = [
 ]
 
 [tool.isort]
-line_length = 79
+line_length = 119
 multi_line_output = 5
 known_third_party = ["PIL", "addict", "easydict", "fsspec", "lmdb", "msgpack", "numpy", "cv2", "pycocotools", "pytest", "scipy", "six", "termcolor", "torch", "torchvision", "yaml"]
 known_locals = ["utilities"]
@@ -99,9 +101,11 @@ dedent_closing_brackets = true
 blank_line_before_nested_class_or_def = true
 
 [tool.flake8]
-max-line-length = 79
-exclude = ["docs/*"]
-per-file-ignores = {"__init__.py" = ["F401", "F403"]}
+max-line-length = 119
+exclude = ["docs/*", "tests/*" , "examples/*"]
+per-file-ignores = """
+    __init__.py: F401,F403
+"""
 select = ["E", "W", "F"]
 verbose = 2
 format = "pylint"
@@ -112,7 +116,6 @@ index_url = "https://pypi.hobot.cc/simple"
 
 [tool.pydocstyle]
 convention = "pep257"
-add-ignore = ["D104", "D107", "D202", "D105", "D100", "D102", "D103", "D101"]
 
 [tool.mypy]
 files = ["securemr"]

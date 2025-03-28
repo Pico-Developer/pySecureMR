@@ -43,7 +43,7 @@ isort:
 
 
 black:
-	black . -l 79
+	black . -l 119
 
 
 flake8:
