@@ -62,6 +62,17 @@ def get_output_node_ids(context_binary: str, QNN_SDK_ROOT: str) -> List[str]:
     return output_ids
 
 
+def set_host_or_android():
+    """
+    If adb device is available, return "android". Or return "host".
+    """
+    client = AdbClient(host="127.0.0.1", port=5037)
+    if devices := client.devices():
+        return "android"
+    else:
+        return "host"
+
+
 class QnnModel:
     '''
     A class to represent a QNN model for running inference on different targets (host or android).
@@ -89,6 +100,10 @@ class QnnModel:
     def __init__(self, context_binary, target="host", output_node_ids=None, name="sampleapp_test"):
         self.QNN_SDK_ROOT = os.getenv("QNN_SDK_ROOT")
         assert self.QNN_SDK_ROOT, "Please set QNN_SDK_ROOT env."
+
+        if target is None:
+            target = set_host_or_android()
+
         target_list = ["host", "android"]
         assert target in target_list
         target_names = ["x86_64-linux-clang", "aarch64-android"]
@@ -103,7 +118,6 @@ class QnnModel:
         else:
             self.output_node_ids = output_node_id.split(",")
         if self.target == "aarch64-android":
-            assert ppadb is not None, "Please install ppadb by pip install pure-python-adb"
             # Default is "127.0.0.1" and 5037
             client = AdbClient(host="127.0.0.1", port=5037)
             if devices := client.devices():
