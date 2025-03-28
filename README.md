@@ -1,3 +1,10 @@
+<p align="center">
+    <a  alt="python version">
+        <img src="https://img.shields.io/badge/python-3.10-blue?logo=python" /></a>
+    <a> <img src="https://img.shields.io/badge/secure-mr-green" /></a>
+    <a> <img src="https://img.shields.io/badge/os-linux-yellow" /></a>
+</p>
+
 # pySecureMR
 
 Python bindings for [SecureMR](https://path-to-SecureMR-link) project.
