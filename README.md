@@ -24,8 +24,8 @@ Python bindings for [SecureMR](https://path-to-SecureMR-link) project.
 
 When developing a SecureMR app, it's not very easy to debug pipeline.
 You are not allowed to access each operator output directly. `pySecureMR` happens here
-to rescue you from complicated and painful debugging time. We bind most of SecureMR
-operators to python so you can call each operator and check input and output.
+to rescue you from complicated and painful debugging time. We bind [most of SecureMR
+operators to python](#supported-operators) so you can call each operator and check input and output.
 
 ## Supported platform
 - Linux (ubuntu22): YES
