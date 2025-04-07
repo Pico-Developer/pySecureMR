@@ -23,6 +23,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import List
 
@@ -135,11 +136,20 @@ class QnnModel:
             self.output_node_ids = output_node_ids.split(",")
         if self.target == "aarch64-android":
             # Default is "127.0.0.1" and 5037
-            client = AdbClient(host="127.0.0.1", port=5037)
-            if devices := client.devices():
-                self.adb = devices[0]
-            else:
-                raise RuntimeError("No android devices found.")
+            # Allow configurable ADB host and port for Docker environments
+            adb_host = os.getenv("ADB_HOST", "host.docker.internal" if os.path.exists("/.dockerenv") else "127.0.0.1")
+            adb_port = int(os.getenv("ADB_PORT", "5037"))
+            try:
+                client = AdbClient(host=adb_host, port=adb_port)
+                if devices := client.devices():
+                    self.adb = devices[0]
+                else:
+                    raise RuntimeError("No android devices found.")
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to connect to ADB at {adb_host}:{adb_port}. Error: {str(e)}\n"
+                    "Please ensure ADB is running on the host and properly forwarded to Docker."
+                )
             self.remote_dir = f"/data/local/tmp/{name}"
             self.adb.shell(f"rm -rf {self.remote_dir}")
             self.adb.shell(f"mkdir -p {self.remote_dir}")
@@ -173,6 +183,7 @@ class QnnModel:
         is_numpy = isinstance(x, np.ndarray)
 
         with tempfile.TemporaryDirectory() as temp_calib_dir:
+            temp_calib_dir = self.remote_dir if self.target == "aarch64-android" else temp_calib_dir
             list_txt = os.path.join(temp_calib_dir, "input_list.txt")
             list_fid = open(list_txt, "w")
             cnt = 0
@@ -288,7 +299,15 @@ class QnnModel:
         """
 
         def _push(src, dst=""):
-            self.adb.push(src, f"{self.remote_dir}/{dst}{os.path.basename(src)}")
+            if not os.path.exists(src):
+                raise FileNotFoundError(f"Source file not found: {src}")
+            remote_path = f"{self.remote_dir}/{dst}{os.path.basename(src)}"
+            self.adb.push(src, remote_path)
+            # Ensure proper permissions on pushed file
+            self.adb.shell(f"chmod 644 {remote_path}")
+            # Verify file was pushed successfully
+            if not self.adb.shell(f"ls {remote_path} 2>/dev/null").strip():
+                raise RuntimeError(f"Failed to push file to device: {remote_path}")
 
         res = self.adb.shell(f"ls {self.remote_dir}/qnn-net-run; echo $?")
         if "No such file or directory" in res:
@@ -302,34 +321,99 @@ class QnnModel:
                 _push(libfile, "dsp/")
             _push(self.context_binary)
 
+        # Ensure input_list exists and is accessible
+        if not os.path.exists(input_list):
+            raise FileNotFoundError(f"Input list file not found: {input_list}")
+
         new_input_list = os.path.splitext(input_list)[0] + "_android.txt"
-        with open(new_input_list, "w") as fid:
-            for line in open(input_list, "r"):
-                _push(line.strip())
-                fid.write(f"{self.remote_dir}/{os.path.basename(line)}")
-        _push(new_input_list)
-        new_input_list = f"{self.remote_dir}/{os.path.basename(new_input_list)}"
+        temp_input_list = None
+        try:
+            temp_input_list = os.path.join(os.path.dirname(input_list), "temp_input_list.txt")
+            with open(temp_input_list, "w") as fid:
+                with open(input_list, "r") as src:
+                    for line in src:
+                        raw_file = line.strip()
+                        if not os.path.exists(raw_file):
+                            raise FileNotFoundError(f"Raw file not found: {raw_file}")
+                        _push(raw_file)
+                        fid.write(f"{self.remote_dir}/{os.path.basename(raw_file)}\n")
+
+            # Push the temporary input list to device and verify
+            remote_input_list = f"{self.remote_dir}/input_list.txt"
+            _push(temp_input_list)
+            if not self.adb.shell(f"ls {remote_input_list} 2>/dev/null").strip():
+                raise RuntimeError(f"Failed to push input list to device at {remote_input_list}")
+            new_input_list = remote_input_list
+        finally:
+            if temp_input_list and os.path.exists(temp_input_list):
+                try:
+                    os.unlink(temp_input_list)  # Clean up temporary file
+                except OSError:
+                    pass  # Ignore cleanup errors
 
         new_output_dir = f"{self.remote_dir}/output_dir"
-        self.adb.shell(f"mkdir -p {new_output_dir}")
+        self.adb.shell(f"rm -rf {new_output_dir}; mkdir -p {new_output_dir}")
+
+        # Verify library paths
+        cpu_lib_path = f"{self.remote_dir}/cpu"
+        dsp_lib_path = f"{self.remote_dir}/dsp"
+        lib_check = self.adb.shell(f"ls {cpu_lib_path}/libQnnHtp.so 2>/dev/null || echo 'missing'")
+        if "missing" in lib_check:
+            raise RuntimeError(f"Required library libQnnHtp.so not found in {cpu_lib_path}")
 
         cmd = f"""\
-        export LD_LIBRARY_PATH={self.remote_dir}/cpu:$LD_LIBRARY_PATH; \
-        export ADSP_LIBRARY_PATH=\"{self.remote_dir}/dsp\"; \
+        export LD_LIBRARY_PATH={cpu_lib_path}:$LD_LIBRARY_PATH; \
+        export ADSP_LIBRARY_PATH=\"{dsp_lib_path}\"; \
         export CDSP_ID=0;
         cd {self.remote_dir};\
         chmod +x {self.remote_dir}/qnn-net-run; {self.remote_dir}/qnn-net-run \
             --backend libQnnHtp.so \
             --retrieve_context {os.path.basename(self.context_binary)} \
             --input_list {new_input_list} \
-            --output_dir {new_output_dir}
+            --output_dir {new_output_dir} 2>&1
         """
-        # chmod +x qnn-sample-app; {self.remote_dir}/qnn-sample-app --system_library libQnnSystem.so \
 
-        # print(cmd)
-        os.system(f"adb shell '{cmd}'")  # with log
-        # self.adb.shell(cmd)
+        # Execute command and capture output
+        cmd_output = self.adb.shell(cmd)
+
+        # Check for common QNN errors
+        error_patterns = ["Error", "error", "Could not readInputListsV2", "failed", "Failed"]
+        for pattern in error_patterns:
+            if pattern in cmd_output:
+                # Debug information
+                debug_info = self.adb.shell(
+                    f"ls -l {self.remote_dir}; cat {new_input_list} 2>/dev/null || echo 'Cannot read input list'"
+                )
+                raise RuntimeError(f"QNN execution failed with error:\n{cmd_output}\n\nDebug info:\n{debug_info}")
 
         temp_dir = os.path.dirname(output_dir)
-        shutil.rmtree(output_dir)
-        _ = os.system(f"adb pull {new_output_dir} {temp_dir}/")
+        shutil.rmtree(output_dir, ignore_errors=True)
+
+        # Verify output directory with retries
+        max_verify_retries = 3
+        for attempt in range(max_verify_retries):
+            if self.adb.shell(f"ls {new_output_dir} 2>/dev/null").strip():
+                break
+            if attempt == max_verify_retries - 1:
+                raise RuntimeError(
+                    f"Output directory {new_output_dir} not created on device.\nCommand output:\n{cmd_output}"
+                )
+            time.sleep(1)
+
+        # Pull output directory with retries
+        max_retries = 3
+        for attempt in range(max_retries):
+            pull_result = self.adb.shell(f"ls {new_output_dir}/Result_*")
+            if not pull_result or "No such file" in pull_result:
+                if attempt < max_retries - 1:
+                    time.sleep(1)  # Wait before retry
+                    continue
+                raise RuntimeError(f"No output files found in {new_output_dir} after {max_retries} attempts")
+
+            pull_cmd = f"adb pull {new_output_dir} {temp_dir}/"
+            if os.system(pull_cmd) != 0:
+                if attempt < max_retries - 1:
+                    time.sleep(1)  # Wait before retry
+                    continue
+                raise RuntimeError(f"Failed to pull output files from device after {max_retries} attempts")
+            break

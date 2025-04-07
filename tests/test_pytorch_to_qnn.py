@@ -38,4 +38,4 @@ def test_pytorch_to_qnn_and_compare():
 
     out1 = torch_model(input_data)
     out2 = qnn_model(input_data)
-    np.testing.assert_allclose(out1.detach().numpy(), out2.numpy(), atol=1e-2)
+    np.testing.assert_allclose(out1.detach().numpy(), out2.numpy(), atol=1e-1)

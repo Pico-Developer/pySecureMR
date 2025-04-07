@@ -16,7 +16,7 @@
 import os
 import shutil
 import tempfile
-from typing import List
+from typing import List, Tuple
 
 from .generate_info import main as generate_info_main
 from .qnn_model import QnnModel
@@ -36,6 +36,8 @@ def pytorch_to_qnn(
     qnn_context_binary_generator_kwargs: str | List = "",
     output: str = None,
     via_onnx: bool = False,
+    input_names: Tuple = ("input",),
+    output_names: Tuple = None,
 ) -> QnnModel:
     """
     Convert pytorch model to qnn model.
@@ -71,14 +73,16 @@ def pytorch_to_qnn(
                 model_path,
                 export_params=True,
                 input_sample=example_inputs,
-                input_names=("input",),
+                input_names=input_names,
+                output_names=output_names,
             )
         else:
             onnx_program = torch.onnx.export(
                 torch_model,
                 example_inputs,
                 dynamo=True,
-                input_names=("input",),
+                input_names=input_names,
+                output_names=output_names,
             )
             onnx_program.save(model_path)
         convert_bin = "qnn-onnx-converter"
@@ -97,7 +101,12 @@ def pytorch_to_qnn(
         kwargs = qnn_pytorch_convert_kwargs
     if not DEBUG_QNN:
         kwargs += " 2>/dev/null"
-    cmd = f"{convert_bin} --input_network {model_path} --float_bitwidth 16 --input_dim 'input' {input_shape} {kwargs}"
+    if len(input_names) > 1:
+        raise NotImplementedError
+    cmd = (
+        f"{convert_bin} --input_network {model_path} --float_bitwidth 16 "
+        f"--input_dim '{input_names[0]}' {input_shape} {kwargs}"
+    )
     run(cmd)
 
     # qnn-model-lib-generator
