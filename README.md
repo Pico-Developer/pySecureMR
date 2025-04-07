@@ -1,8 +1,13 @@
 # pySecureMR
 
+<div align="center">
+
 [![PyPI][pypi-badge]][pypi-url]
 [![MIT licensed][mit-badge]][mit-url]
 [![Python Version][python-badge]][python-url]
+
+</div>
+
 
 <p align="center">
   <a  alt="python version">
