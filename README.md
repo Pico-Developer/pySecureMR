@@ -1,21 +1,12 @@
 # pySecureMR
 
-<div align="center">
-
-[![PyPI][pypi-badge]][pypi-url]
-[![MIT licensed][mit-badge]][mit-url]
-[![Python Version][python-badge]][python-url]
-
-</div>
-
-
 <p align="center">
   <a  alt="python version">
       <img src="https://img.shields.io/badge/python-3.10-blue?logo=python" /></a>
+  <a href="https://pypi.org/project/securemr/"> <img alt="PyPI - Wheel" src="https://img.shields.io/pypi/wheel/securemr"> </a>
   <a> <img src="https://img.shields.io/badge/secure-mr-green" /></a>
   <a> <img src="https://img.shields.io/badge/os-linux-yellow" /></a>
   <a> <img src="https://img.shields.io/badge/os-windows(wsl2)-yellow" /></a>
-  <img alt="PyPI - Wheel" src="https://img.shields.io/pypi/wheel/securemr">
 </p>
 
 Python bindings for [SecureMR](https://path-to-SecureMR-link) project.
