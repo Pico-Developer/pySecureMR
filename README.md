@@ -1,5 +1,9 @@
 # pySecureMR
 
+[![PyPI][pypi-badge]][pypi-url]
+[![MIT licensed][mit-badge]][mit-url]
+[![Python Version][python-badge]][python-url]
+
 <p align="center">
   <a  alt="python version">
       <img src="https://img.shields.io/badge/python-3.10-blue?logo=python" /></a>
