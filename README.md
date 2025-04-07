@@ -35,6 +35,12 @@ operators to python](#supported-operators) so you can call each operator and che
 
 ## Install
 
+### Pip
+
+```bash
+pip3 install securemr
+```
+
 ### Manual install
 ```bash
 git clone https://github.com/Pico-Developer/pySecureMR
@@ -44,12 +50,6 @@ pip3 install -e "."
 Check installation:
 ```bash
 python3 -c "import securemr"
-```
-
-### Pip
-
-```bash
-pip3 install securemr
 ```
 
 ## Run test
