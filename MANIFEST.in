@@ -1,2 +1,10 @@
 include LICENSE
 include License.md
+include securemr/_bindings/libopencv_calib3d.so.3.4
+include securemr/_bindings/libopencv_core.so.3.4
+include securemr/_bindings/libopencv_flann.so.3.4
+include securemr/_bindings/libopencv_imgcodecs.so.3.4
+include securemr/_bindings/libopencv_imgproc.so.3.4
+include securemr/_bindings/libopenmr-backend.so
+include securemr/_bindings/libSNPE.so
+include securemr/_bindings/_securemr.cpython-310-x86_64-linux-gnu.so

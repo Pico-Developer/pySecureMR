@@ -40,6 +40,8 @@ dev = [
   "pydocstyle==6.1.1",
   "pep8-naming==0.12.1",
   "mypy",
+  "build",
+  "twine"
 ]
 
 [[project.authors]]

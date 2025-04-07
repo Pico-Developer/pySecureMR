@@ -40,14 +40,10 @@ pydocstyle:
 
 
 wheel:
-	python3 setup.py sdist bdist_wheel; \
-	ls dist
+	python3 -m build
 
 upload:
-	python setup.py bdist_wheel upload -r hobot-local
+	twine upload dist/*
 
-clean-wheel:
-	@rm -rf dist
-
-clean: clean-wheel clean-doc
-	@rm -r build *.egg-info
+clean:
+	@rm -rf dist build *.egg-info

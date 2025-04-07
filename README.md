@@ -47,7 +47,9 @@ python3 -c "import securemr"
 
 ### Pip
 
-TODO
+```bash
+pip3 install securemr
+```
 
 ## Run test
 
