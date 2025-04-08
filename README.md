@@ -95,3 +95,11 @@ Refer to [test code](./tests) to learn more about the usage.
 | 33  | UPLOAD_TEXTURE_TO_GLTF       | ❌     |
 
 
+## How to contribute
+
+Before codeing, please install develop related tools by:
+```
+make env
+```
+
+For new features, unittest is required.

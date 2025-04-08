@@ -14,9 +14,6 @@
 
 import securemr as smr
 
-import numpy as np
-import pytest
-
 
 class TestTensorFactory:
     """TensorFactory测试类"""
@@ -47,9 +44,9 @@ class TestTensorFactory:
         # 创建一些tensor
         shape = [100, 100, 3]
         dtype = int(smr.EDataType.UINT8) | smr.BaseType.MAT
-        tensor1 = smr.TensorFactory.create(shape, dtype)
+        _ = smr.TensorFactory.create(shape, dtype)
         dtype = int(smr.EDataType.FLOAT32) | smr.BaseType.MAT
-        tensor2 = smr.TensorFactory.create(shape, dtype)
+        _ = smr.TensorFactory.create(shape, dtype)
 
         # 验证内存使用增加
         current_usage = smr.TensorFactory.get_total_memory_usage()

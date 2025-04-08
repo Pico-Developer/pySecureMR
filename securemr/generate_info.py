@@ -69,7 +69,7 @@ class Dtype(object):
 class TensorInfo(object):
     """Container for tensor information."""
 
-    def __init__(self, name="", shape=tuple(), dtype="unknown", doc_string=""):
+    def __init__(self, name="", shape=(), dtype="unknown", doc_string=""):
         self.name = name
         self.shape = shape
         self.dtype = Dtype(dtype)

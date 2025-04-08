@@ -37,7 +37,7 @@ if TORCH_INSTALLED:
 from ppadb.client import Client as AdbClient
 
 
-def get_output_node_ids(context_binary: str, QNN_SDK_ROOT: str) -> List[str]:
+def get_output_node_ids(context_binary: str, QNN_SDK_ROOT: str) -> List[str]:  # noqa
     """
     Get the output node IDs from the context binary file.
 
@@ -237,7 +237,7 @@ class QnnModel:
         Returns:
             Success status of the run.
         """
-        QNN_SDK_ROOT = self.QNN_SDK_ROOT
+        QNN_SDK_ROOT = self.QNN_SDK_ROOT  # noqa
         cmd = f"""\
         {QNN_SDK_ROOT}/bin/{self.target}/qnn-net-run \
             --backend {QNN_SDK_ROOT}/lib/{self.target}/libQnnHtp.so \

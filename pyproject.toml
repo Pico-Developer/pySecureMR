@@ -132,13 +132,6 @@ follow_imports = "silent"
 follow_imports_for_stubs = "True"
 exclude = []
 
-# TODO: Fix typing for these modules
-[[tool.mypy.overrides]]
-module = [
-]
-ignore_errors = "True"
-
-
 [[tool.mypy.overrides]]
 module = [
 ]

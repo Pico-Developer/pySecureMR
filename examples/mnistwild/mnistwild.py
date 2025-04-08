@@ -14,7 +14,6 @@
 
 """Example implementation of MNIST classification in the wild."""
 
-import os
 import pathlib
 
 import securemr as smr
@@ -82,11 +81,11 @@ def preprocess(image_path):
     op2.compute(0)
 
     # to gray
-    ConvertColorOp = smr.OperatorFactory.create(smr.EOperatorType.CONVERT_COLOR, [str(cv2.COLOR_BGR2GRAY)])
+    convert_color_op = smr.OperatorFactory.create(smr.EOperatorType.CONVERT_COLOR, [str(cv2.COLOR_BGR2GRAY)])
     y2 = smr.TensorMat((crop_width, crop_height), 1, smr.EDataType.UINT8)
-    ConvertColorOp.data_as_operand(y1, 0)
-    ConvertColorOp.connect_result_to_data_array(0, y2)
-    ConvertColorOp.compute(0)
+    convert_color_op.data_as_operand(y1, 0)
+    convert_color_op.connect_result_to_data_array(0, y2)
+    convert_color_op.compute(0)
 
     # uint8 to float32
     y3 = smr.TensorMat((crop_width, crop_height), 1, smr.EDataType.FLOAT32)

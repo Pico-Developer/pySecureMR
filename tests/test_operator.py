@@ -16,13 +16,12 @@ import securemr as smr
 
 import cv2
 import numpy as np
-import pytest
 
 
-def test_cvtColor():
+def test_cvt_color():
     configs = [str(cv2.COLOR_BGR2GRAY)]
     op = smr.OperatorFactory.create(smr.EOperatorType.CONVERT_COLOR, configs)
-    assert op != None
+    assert op is not None
     assert op.get_operator_type() == smr.EOperatorType.CONVERT_COLOR
     assert op.get_operand_cnt() == 1
     assert op.get_results_cnt() == 1
@@ -44,7 +43,7 @@ def test_cvtColor():
 def test_affine_image():
     op1 = smr.OperatorFactory.create(smr.EOperatorType.GET_AFFINE)
     op2 = smr.OperatorFactory.create(smr.EOperatorType.APPLY_AFFINE)
-    assert op1 != None and op2 != None
+    assert op1 and op2
 
     assert op1.get_operator_type() == smr.EOperatorType.GET_AFFINE
     assert op1.get_operand_cnt() == 2
@@ -107,7 +106,7 @@ def test_affine_image():
 
 def test_assignment():
     op = smr.OperatorFactory.create(smr.EOperatorType.ASSIGNMENT)
-    assert op != None
+    assert op is not None
     assert op.get_operator_type() == smr.EOperatorType.ASSIGNMENT
     assert op.get_operand_cnt() == 5
     assert op.get_results_cnt() == 1
@@ -125,7 +124,7 @@ def test_assignment():
 def test_arithmetic():
     configs = ["{0} / 255.0"]
     op = smr.OperatorFactory.create(smr.EOperatorType.ARITHMETIC_COMPOSE, configs)
-    assert op != None
+    assert op is not None
     assert op.get_operator_type() == smr.EOperatorType.ARITHMETIC_COMPOSE
     assert op.get_operand_cnt() == 10
     assert op.get_results_cnt() == 1

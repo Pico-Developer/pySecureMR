@@ -51,7 +51,7 @@ def pytorch_to_qnn(
     Returns:
         Path to the converted model.
     """
-    QNN_SDK_ROOT = os.getenv("QNN_SDK_ROOT", None)
+    QNN_SDK_ROOT = os.getenv("QNN_SDK_ROOT", None)  # noqa
     if not QNN_SDK_ROOT:
         raise RuntimeError("QNN_SDK_ROOT not found. Please source qnn environment or install qnn first.")
     original_dir = os.getcwd()
