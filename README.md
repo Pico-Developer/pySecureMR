@@ -97,7 +97,7 @@ Refer to [test code](./tests) to learn more about the usage.
 
 ## How to contribute
 
-Before codeing, please install develop related tools by:
+Before coding, please install develop related tools by:
 ```
 make env
 ```
