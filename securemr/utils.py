@@ -23,7 +23,7 @@ def run(cmd) -> None:
     """Run bash command with print to stdout.
 
     Args:
-        cmd_list: ["bash",  tmp_shell]
+        cmd: command string
     """
     print(f"\033[0;33m>> {cmd}\033[0m")
     (status, output) = commands.getstatusoutput(cmd)

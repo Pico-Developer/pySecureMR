@@ -28,7 +28,7 @@ np.set_printoptions(precision=4, suppress=True)
 
 
 @pytest.mark.skipif(not TORCH_INSTALLED, reason="torch is required")
-def test_pytorch_to_qnn_and_compare():
+def test_host():
     torch_model = models.resnet18(pretrained=True)
     torch_model.eval()
 
@@ -39,3 +39,22 @@ def test_pytorch_to_qnn_and_compare():
     out1 = torch_model(input_data)
     out2 = qnn_model(input_data)
     np.testing.assert_allclose(out1.detach().numpy(), out2.numpy(), atol=1e-1)
+
+
+@pytest.mark.skipif(not TORCH_INSTALLED, reason="torch is required")
+def test_android():
+    torch_model = models.resnet18(pretrained=True)
+    torch_model.eval()
+
+    qnn_model = securemr.pytorch_to_qnn(torch_model, "1,3,224,224")
+    input_shape = [1, 3, 224, 224]
+    input_data = torch.randn(input_shape)
+
+    out1 = torch_model(input_data)
+    out2 = qnn_model(input_data, target="android")
+    np.testing.assert_allclose(out1.detach().numpy(), out2.numpy(), atol=1e-1)
+    qnn_model.benchmark()
+
+
+if __name__ == "__main__":
+    pytest.main(["-s", __file__])

@@ -29,7 +29,7 @@ __all__ = ["pytorch_to_qnn"]
 
 
 def pytorch_to_qnn(
-    torch_model: torch.nn.Module,
+    torch_model: "torch.nn.Module",
     input_shape: str,
     qnn_pytorch_convert_kwargs: str | List = "",
     qnn_model_lib_generator_kwargs: str | List = "",
@@ -51,6 +51,7 @@ def pytorch_to_qnn(
     Returns:
         Path to the converted model.
     """
+    assert TORCH_INSTALLED, "torch is requred."
     QNN_SDK_ROOT = os.getenv("QNN_SDK_ROOT", None)  # noqa
     if not QNN_SDK_ROOT:
         raise RuntimeError("QNN_SDK_ROOT not found. Please source qnn environment or install qnn first.")

@@ -9,7 +9,7 @@
   <a> <img src="https://img.shields.io/badge/os-windows(wsl2)-yellow" /></a>
 </p>
 
-Python bindings for [SecureMR](https://path-to-SecureMR-link) project.
+Python bindings for [SecureMR](https://developer.picoxr.com/document/native/securemr-overview/) project.
 
 ## Table of Contents
 
@@ -94,6 +94,18 @@ Refer to [test code](./tests) to learn more about the usage.
 | 32  | RENDER_TEXT                  | ❌     |
 | 33  | UPLOAD_TEXTURE_TO_GLTF       | ❌     |
 
+## Quick start for QNN
+
+Install qnn. Only tested on Ubuntu22.04 & python3.10
+```
+python3 -m securemr.install_qnn
+```
+
+Run pytorch-to-qnn test and run on android device.
+
+```
+python3 -m securemr.test_pytorch_to_qnn
+```
 
 ## How to contribute
 
