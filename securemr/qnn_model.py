@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import glob
 from pathlib import Path
 from typing import List
 
@@ -81,6 +82,11 @@ def set_host_or_android():
     else:
         return "host"
 
+TARGETS = {
+    "host": "x86_64-linux-clang",
+    "android": "aarch64-android",
+}
+
 
 class QnnModel:
     """
@@ -95,12 +101,13 @@ class QnnModel:
             Builds the sample application for the Android target.
         sampleapp_run(input_list, output_dir):
             Runs the QNN model on the Android platform.
+
     """
 
     def __init__(
         self,
         context_binary: str,
-        target: str = "host",
+        target: str = "host",   # "auto", "android", "host"
         output_node_ids: str = None,
         name="sampleapp_test",
     ):
@@ -118,14 +125,6 @@ class QnnModel:
         self.QNN_SDK_ROOT = os.getenv("QNN_SDK_ROOT")
         assert self.QNN_SDK_ROOT, "Please set QNN_SDK_ROOT env."
 
-        if target is None:
-            target = set_host_or_android(target)
-
-        target_list = ["host", "android"]
-        assert target in target_list
-        target_names = ["x86_64-linux-clang", "aarch64-android"]
-        self.target = target_names[target_list.index(target)]
-
         self.temp_dir = tempfile.mkdtemp()
         cache_context_binary = os.path.join(self.temp_dir, os.path.basename(context_binary))
         shutil.copy(context_binary, cache_context_binary)
@@ -134,6 +133,14 @@ class QnnModel:
             self.output_node_ids = get_output_node_ids(context_binary, self.QNN_SDK_ROOT)
         else:
             self.output_node_ids = output_node_ids.split(",")
+        self.set_target(target)
+        self._input_shapes = None
+
+    def set_target(self, target):
+        if target == "auto":
+            target = set_host_or_android(target)
+        assert target in TARGETS
+        self.target = TARGETS[target]
         if self.target == "aarch64-android":
             # Default is "127.0.0.1" and 5037
             # Allow configurable ADB host and port for Docker environments
@@ -150,6 +157,7 @@ class QnnModel:
                     f"Failed to connect to ADB at {adb_host}:{adb_port}. Error: {str(e)}\n"
                     "Please ensure ADB is running on the host and properly forwarded to Docker."
                 )
+            name = Path(self.context_binary).stem
             self.remote_dir = f"/data/local/tmp/{name}"
             self.adb.shell(f"rm -rf {self.remote_dir}")
             self.adb.shell(f"mkdir -p {self.remote_dir}")
@@ -160,6 +168,9 @@ class QnnModel:
             ) = self.sampleapp_build()
         else:
             pass
+    
+    def set_input_shapes(self, input_shapes):
+        self._input_shapes = input_shapes
 
     def __del__(self):
         """Clean up resources when the object is deleted."""
@@ -183,7 +194,6 @@ class QnnModel:
         is_numpy = isinstance(x, np.ndarray)
 
         with tempfile.TemporaryDirectory() as temp_calib_dir:
-            temp_calib_dir = self.remote_dir if self.target == "aarch64-android" else temp_calib_dir
             list_txt = os.path.join(temp_calib_dir, "input_list.txt")
             list_fid = open(list_txt, "w")
             cnt = 0
@@ -287,6 +297,130 @@ class QnnModel:
         dsp_libraries.extend([os.path.join(lib_dir2, x) for x in dsp_lib_names])
         return binfile, cpu_libraries, dsp_libraries
 
+    def _generate_fake_data(self, num_samples: int = 100, output_path: str = None):
+        """Generate fake quantization data similar to generate_fake_quanti_data.py."""
+        if output_path is None:
+            output_path = os.path.join(self.temp_dir, "fake_data_list.txt")
+        
+        outdir = os.path.join(os.path.dirname(output_path), "fake_raw")
+        os.makedirs(outdir, exist_ok=True)
+        
+        # For QNN context binary, we need to get input shapes from the binary
+        # For simplicity, we'll assume common input shapes for now
+        # In a real implementation, you would parse the context binary to get actual input shapes
+        if self._input_shapes is not None:
+            input_shapes = self._input_shapes 
+        else:
+            input_shapes = [[1, 3, 224, 224]]  # Default shape
+        
+        list_fid = open(output_path, "w")
+        
+        for i in range(num_samples):
+            filename_line = ""
+            for input_idx, shape in enumerate(input_shapes):
+                raw_filename = os.path.join(outdir, f"fake_{input_idx}_{i:06d}.raw")
+                
+                # Generate random data
+                data = np.random.rand(*shape).astype(np.float32)
+                data.tofile(raw_filename)
+                
+                if filename_line:
+                    filename_line += f" {raw_filename}"
+                else:
+                    filename_line = raw_filename
+            
+            list_fid.write(f"{filename_line}\n")
+        
+        list_fid.close()
+        return output_path
+
+    def benchmark(self, input_list_path: str = None, runs: int = 100, runtimes: List[str] = None, 
+                  measurements: List[str] = None, output_dir: str = None):
+        """Run benchmark on android device using QNN benchmark tool.
+        
+        Args:
+            input_list_path: Path to the input list file for benchmark
+            runs: Number of test runs (default: 100)
+            runtimes: List of runtimes to test (e.g., ["HTP_v69"], default: ["HTP_v69"])
+            measurements: List of measurements to collect (e.g., ["timing"], default: ["timing"])
+            output_dir: Output directory for benchmark results
+            
+        Returns:
+            Path to benchmark results directory
+        """
+        if runtimes is None:
+            runtimes = ["HTP_v69"]
+        if measurements is None:
+            measurements = ["timing"]
+        
+        # Import the benchmark config generation function
+        try:
+            from .generate_benchmark_json import generate_benchmark_config
+        except ImportError:
+            raise ImportError("generate_benchmark_json.py not found in current package")
+        
+        # Create temporary directory for benchmark files
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Generate benchmark JSON configuration
+            benchmark_json_path = os.path.join(temp_dir, "benchmark_config.json")
+
+            if not output_dir:
+                output_dir = os.path.join(temp_dir, "benchmark_output")
+            
+            # Get model name from context binary
+            model_name = Path(self.context_binary).stem
+            
+            # If input_list_path is not provided, generate fake data
+            if input_list_path is None:
+                input_list_path = self._generate_fake_data(num_samples=runs, output_path=os.path.join(temp_dir, "fake_data_list.txt"))
+            
+            # Generate benchmark config using imported function
+            generate_benchmark_config(
+                model_path=self.context_binary,
+                input_list_path=input_list_path,
+                output_json=benchmark_json_path,
+                task_name=model_name,
+                model_name=model_name,
+                runs=runs,
+                runtimes=runtimes,
+                measurements=measurements,
+                version="qnn",
+                cache=True,
+                output=output_dir
+            )
+            
+            # Run the benchmark using qnn_bench.py
+            qnn_bench_path = Path(self.QNN_SDK_ROOT) / "benchmarks"/ "QNN" / "qnn_bench.py"
+            
+            # Set ANDROID_NDK_ROOT environment variable
+            env = os.environ.copy()
+            env["ANDROID_NDK_ROOT"] = "/home/bingwen/opt/android-ndk-r26c"
+            
+            benchmark_cmd = [
+                "python3", str(qnn_bench_path), "-c", benchmark_json_path
+            ]
+
+            # bugfix for ADSP_LIBRARY_PATH
+            dsp_path = "/data/local/tmp/qnn_benchmark/artifacts/dsp/"
+            res = self.adb.shell(f"ls {dsp_path}; echo $?")
+            if "No such file or directory" in res:
+                self.adb.shell(f"mkdir -p {dsp_path}")
+                self.adb.shell(f"ln -s {self.remote_dir}/dsp {dsp_path}/lib")
+            
+            # Execute benchmark
+            os.system(" ".join(benchmark_cmd))
+            # result = subprocess.run(benchmark_cmd, env=env, capture_output=True, text=True)
+            # if result.returncode != 0:
+            #     raise RuntimeError(f"Benchmark failed: {result.stderr}")
+            
+            # print result
+            result_csv = glob.glob(os.path.join(output_dir, "latest_results/benchmark_stats_*.csv"))
+            if not result_csv:
+                print("No result csv found.")
+                return
+            os.system(f"cat {result_csv[0]} | grep NetRun | grep Inference")
+
+
     def sampleapp_run(self, input_list, output_dir):
         """Run the sample application with the given inputs.
 
@@ -339,8 +473,8 @@ class QnnModel:
                         fid.write(f"{self.remote_dir}/{os.path.basename(raw_file)}\n")
 
             # Push the temporary input list to device and verify
-            remote_input_list = f"{self.remote_dir}/input_list.txt"
             _push(temp_input_list)
+            remote_input_list = f"{self.remote_dir}/temp_input_list.txt"
             if not self.adb.shell(f"ls {remote_input_list} 2>/dev/null").strip():
                 raise RuntimeError(f"Failed to push input list to device at {remote_input_list}")
             new_input_list = remote_input_list
@@ -377,7 +511,8 @@ class QnnModel:
         cmd_output = self.adb.shell(cmd)
 
         # Check for common QNN errors
-        error_patterns = ["Error", "error", "Could not readInputListsV2", "failed", "Failed"]
+        error_patterns = ["Error", "error", "Could not readInputListsV2",
+                          "failed", "Failed", "failure"]
         for pattern in error_patterns:
             if pattern in cmd_output:
                 # Debug information

@@ -64,8 +64,9 @@ def pytorch_to_qnn(
     os.chdir(temp_dir)
 
     torch_model.eval()
+    input_shape_list = [int(i) for i in input_shape.split(",")]
+
     if via_onnx:
-        input_shape_list = [int(i) for i in input_shape.split(",")]
         example_inputs = (torch.randn(*input_shape_list),)
 
         model_path = os.path.join(temp_dir, "model.onnx")
@@ -140,6 +141,7 @@ def pytorch_to_qnn(
     try:
         assert os.path.exists(context_binary_file)
         qnn_model = QnnModel(context_binary_file)
+        qnn_model.set_input_shapes([input_shape_list])
     except Exception as e:
         if DEBUG_QNN:
             print(f"\033[0;33m Oooooops! Debug qnn convert in {temp_dir}\033[0m")

@@ -47,13 +47,15 @@ def test_android():
     torch_model.eval()
 
     qnn_model = securemr.pytorch_to_qnn(torch_model, "1,3,224,224")
+    qnn_model.set_target("android")
+
     input_shape = [1, 3, 224, 224]
     input_data = torch.randn(input_shape)
 
     out1 = torch_model(input_data)
-    out2 = qnn_model(input_data, target="android")
+    out2 = qnn_model(input_data)
     np.testing.assert_allclose(out1.detach().numpy(), out2.numpy(), atol=1e-1)
-    qnn_model.benchmark()
+    qnn_model.benchmark(runs=500)
 
 
 if __name__ == "__main__":
