@@ -47,6 +47,7 @@ from ._bindings._securemr import (
 # isort: on
 
 from .pytorch_to_qnn import pytorch_to_qnn
+from .onnx_to_qnn import onnx_to_qnn
 from .qnn_model import QnnModel
 from .utils import TORCH_INSTALLED
 

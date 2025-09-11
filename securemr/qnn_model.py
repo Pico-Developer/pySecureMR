@@ -170,6 +170,8 @@ class QnnModel:
             pass
     
     def set_input_shapes(self, input_shapes):
+        while np.asarray(input_shapes).ndim > 2:
+            input_shapes = input_shapes[0]
         self._input_shapes = input_shapes
 
     def __del__(self):
@@ -348,6 +350,7 @@ class QnnModel:
         Returns:
             Path to benchmark results directory
         """
+        assert self.target == "aarch64-android", "benchmark only valid when target='android'"
         if runtimes is None:
             runtimes = ["HTP_v69"]
         if measurements is None:
@@ -400,7 +403,14 @@ class QnnModel:
                 "python3", str(qnn_bench_path), "-c", benchmark_json_path
             ]
 
-            # bugfix for ADSP_LIBRARY_PATH
+            # Bugfix for ADSP_LIBRARY_PATH, benchmark.py required "artifacts/dsp/lib/xxx.so"
+            # Upload first if need and link to it.
+            res = self.adb.shell(f"ls {self.remote_dir}/dsp; echo $?")
+            if "No such file or directory" in res:
+                self.adb.shell(f"mkdir -p {self.remote_dir}/dsp")
+                for dsp_library in self.dsp_libraries:
+                    lib_name = os.path.basename(dsp_library)
+                    self.adb.push(dsp_library, f"{self.remote_dir}/dsp/{lib_name}")
             dsp_path = "/data/local/tmp/qnn_benchmark/artifacts/dsp/"
             res = self.adb.shell(f"ls {dsp_path}; echo $?")
             if "No such file or directory" in res:

@@ -16,7 +16,7 @@
 import os
 import subprocess as commands
 
-__all__ = ["run", "DEBUG_QNN", "TORCH_INSTALLED"]
+__all__ = ["run", "DEBUG_QNN", "TORCH_INSTALLED", "ONNX_INSTALLED"]
 
 
 def run(cmd) -> None:
@@ -41,3 +41,10 @@ try:
     TORCH_INSTALLED = True
 except ImportError:
     TORCH_INSTALLED = False
+
+try:
+    import onnx  # noqa
+
+    ONNX_INSTALLED = True
+except ImportError:
+    ONNX_INSTALLED = False
