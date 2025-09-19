@@ -62,6 +62,12 @@ class TestTensorMat:
             result = tensor.numpy()
             np.testing.assert_array_equal(result, test_data)
 
+        def test_numpy(self):
+            x = np.random.randn(1, 128000, 20).astype(np.float32)
+            y = smr.TensorMat.from_numpy(x).numpy()
+            # with pytest.raises(Exception):
+            np.testing.assert_array_equal(x, y)
+
     class TestOperations:
         """TensorMat操作相关的测试"""
 

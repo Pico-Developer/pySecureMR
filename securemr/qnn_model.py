@@ -176,7 +176,7 @@ class QnnModel:
 
     def __del__(self):
         """Clean up resources when the object is deleted."""
-        if os.path.exists(self.temp_dir) and (not DEBUG_QNN):
+        if hasattr(self, "temp_dir") and os.path.exists(self.temp_dir) and (not DEBUG_QNN):
             shutil.rmtree(self.temp_dir)
 
     def __call__(self, x, is_nhwc=False):
@@ -189,6 +189,8 @@ class QnnModel:
         Returns:
             Model outputs.
         """
+        if isinstance(x, np.ndarray):
+            x = torch.tensor(x)
         assert x.ndim == 4
         if not is_nhwc:
             x = x.permute(0, 2, 3, 1)  # NCHW -> NHWC

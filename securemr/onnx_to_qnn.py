@@ -52,6 +52,7 @@ def onnx_to_qnn(
     original_dir = os.getcwd()
     if output:
         output = os.path.abspath(output)
+    onnx_file = os.path.abspath(onnx_file)
 
     # dump torch_model to a temp dir
     temp_dir = tempfile.mkdtemp()
