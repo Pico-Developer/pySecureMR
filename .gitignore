@@ -58,4 +58,4 @@ docs/_build
 !docs/Makefile
 !docs/source/_static/*.png
 
-examples/mnistwild/mnistwild_preprocess_vis.html
+examples/mnistwild/mnistwild_pipeline_vis.html

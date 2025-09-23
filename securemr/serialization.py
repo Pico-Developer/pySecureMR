@@ -30,13 +30,13 @@ import securemr as smr
 import re
 
 
-__all__ = ["Pipeline", "DeserializedPipeline"]
+__all__ = ["Pipeline", "DeserializedPipeline", "add_vst_operator", "add_model_inference_operator"]
 
 SPEC_VERSION = "1.0.0"
 
-NUMPY_DTYPE = [np.uint8, np.int8, np.uint16, np.int16, np.int32, np.float32, np.float64]
+NUMPY_DTYPE = [None, np.uint8, np.int8, np.uint16, np.int16, np.int32, np.float32, np.float64]
 
-SMR_DTYPE = [smr.EDataType.UINT8, smr.EDataType.INT8, smr.EDataType.UINT16,
+SMR_DTYPE = [None, smr.EDataType.UINT8, smr.EDataType.INT8, smr.EDataType.UINT16,
              smr.EDataType.INT16, smr.EDataType.INT32,smr.EDataType.FLOAT32,
              smr.EDataType.FLOAT64]
 
@@ -63,6 +63,25 @@ def convert_from_dtype(data_type, source="numpy") -> "type":
     else:
         raise NotImplementedError
 
+
+def mat_flag(dtype: smr.EDataType, channels: int) -> int:
+    return int(dtype) | smr.BaseType.MAT | (smr.BaseType.CHANNEL_MASK & channels)
+
+
+def unmat_flag(flag: int) -> tuple[smr.EDataType, int]:
+    # Optional: ensure this is a MAT-typed flag
+    if not (int(flag) & int(smr.BaseType.MAT)):
+        raise ValueError("flag does n encode a MAT type")
+
+    # Extract channels
+    channels = int(flag) & int(smr.BaseType.CHANNEL_MASK)
+
+    # Recover dtype: clear MAT and channel bits, then cast to EDataType
+    clear_mask = int(smr.BaseType.MAT) | int(smr.BaseType.CHANNEL_MASK)
+    dtype_bits = int(flag) & ~clear_mask
+    dtype = smr.EDataType(dtype_bits)
+    
+    return dtype, channels
 
 def as_list(data):
     if isinstance(data, (list, tuple)):
@@ -252,16 +271,16 @@ class Pipeline(smr.Pipeline):
         if not name:
             name = f"tensor_{int(tid)}"
         self._tensor_id_to_name[int(tid)] = name
-        # derive channels and data_type best-effort from flag
-        channels = int(flag) & int(smr.BaseType.CHANNEL_MASK)
-        data_type_val = int(flag) & 0xFF
         # Fix-up for point types: they are always float32 with 2 channels
-        try:
-            if int(flag) & int(smr.BaseType.POINT_2):
-                channels = 2
-                data_type_val = convert_from_dtype(np.float32)
-        except Exception:
-            pass
+        if int(flag) & int(smr.BaseType.MAT):
+            dtype, channels = unmat_flag(flag)
+            data_type_val = convert_from_dtype(dtype, source="smr")
+        elif int(flag) & int(smr.BaseType.POINT_2):
+            channels = 2
+            data_type_val = convert_from_dtype(np.float32)
+        else:
+            raise NotImplementedError
+
         self.spec["tensors"][name] = {
             "dimensions": list(shape),
             "channels": int(channels) if channels > 0 else 1,
@@ -493,6 +512,137 @@ class Pipeline(smr.Pipeline):
         self._normalize_placeholders()
         with open(file_path, 'w', encoding='utf-8') as f:
             json.dump(self.spec, f, indent=2, ensure_ascii=False)
+
+
+def add_vst_operator(pipeline, replace_pair):
+    """Append a VST access operator to the saved spec and rewire input.
+
+    Args:
+        pipeline: an instance of Pipeline (the extended smr.Pipeline).
+        replace_pair: tuple(old_name, new_name). All occurrences of the
+            old tensor name in existing operators are replaced with the new
+            name. The VST operator will produce the new_name as its left RGB
+            output alongside additional standard outputs.
+
+    Notes:
+        - This augments only the serialized JSON spec and does not add a
+          runnable operator to the underlying smr.Pipeline graph.
+        - Output names roughly follow the reference in mnist_inference_pipeline.json.
+    """
+    if not hasattr(pipeline, "spec"):
+        raise TypeError("pipeline must be a Pipeline instance with a .spec")
+
+    old_name, new_name = replace_pair
+    spec = pipeline.spec
+
+    # Choose output names. Keep the user-provided left image name and add companions.
+    right_name = "right_rgb"
+    left_name = str(new_name)
+    ts_name = "timestamp_tensor"
+    cam_mat_name = "camera_matrix_tensor"
+
+    # Insert the VST access operator at the front to mirror a source op.
+    vst_op = {
+        "type": "camera_access",  # alias for RECTIFIED_VST_ACCESS
+        "inputs": [],
+        "outputs": [right_name, left_name, ts_name, cam_mat_name],
+    }
+    spec["operators"].insert(0, vst_op)
+
+    # Ensure tensor descriptors exist for new outputs, inferring from the old input if possible.
+    tensors = spec.setdefault("tensors", {})
+    base = tensors.get(old_name, {})
+    # Fall back sizes if original input not recorded
+    dims = list(base.get("dimensions", [])) or [2464, 3248]
+
+    def _ensure_tensor(name: str, channels: int, data_type: int, dimensions=None, is_placeholder=False, usage=6):
+        if name in tensors:
+            return
+        tensors[name] = {
+            "dimensions": list(dimensions) if dimensions is not None else list(dims),
+            "channels": int(channels),
+            "data_type": int(data_type),
+            "is_placeholder": bool(is_placeholder),
+            "usage": int(usage),
+        }
+
+    # right/left RGB as uint8 3-channel mats
+    _ensure_tensor(right_name, channels=3, data_type=convert_from_dtype(np.uint8), dimensions=dims, is_placeholder=False, usage=6)
+    _ensure_tensor(left_name, channels=3, data_type=convert_from_dtype(np.uint8), dimensions=dims, is_placeholder=False, usage=6)
+    # timestamp and camera matrix tensors (float32)
+    _ensure_tensor(ts_name, channels=4, data_type=convert_from_dtype(np.int32), dimensions=[1], is_placeholder=False, usage=5)
+    _ensure_tensor(cam_mat_name, channels=1, data_type=convert_from_dtype(np.float32), dimensions=[3, 3], is_placeholder=False, usage=6)
+
+    # Rewire existing operator references from old_name -> left_name
+    for op in spec.get("operators", []):
+        ins = op.get("inputs", [])
+        outs = op.get("outputs", [])
+        op["inputs"] = [left_name if x == old_name else x for x in ins]
+        op["outputs"] = [left_name if x == old_name else x for x in outs]
+
+    # Update IO declaration: remove old input placeholder since now fed by camera op
+    if "inputs" in spec:
+        spec["inputs"] = [x for x in as_list(spec["inputs"]) if x != old_name]
+    tensors.pop(old_name)
+
+
+def add_model_inference_operator(
+    pipeline,
+    *,
+    context_binary_file: str,
+    model_name: str,
+    model_input: List[Dict],
+    model_output: List[Dict],
+    model_output_tensor_info: List[Dict],
+):
+    """Append a model inference operator to the saved spec.
+
+    The operator type is recorded as "run_model_inference" with model metadata
+    fields. Inputs/outputs are simple tensor name lists for loader compatibility.
+
+    Args:
+        pipeline: Pipeline to augment (serialization spec only).
+        context_binary_file: Model asset filename (e.g., "mnist.serialized.bin").
+        model_name: Logical model name.
+        model_input: Iterable of input tensor names.
+        model_output: Iterable of output tensor names.
+    """
+    if not hasattr(pipeline, "spec"):
+        raise TypeError("pipeline must be a Pipeline instance with a .spec")
+
+    spec = pipeline.spec
+
+    # Append operator entry
+    op = {
+        "type": "run_algorithm",
+        "inputs": model_input,
+        "outputs": model_output,
+        "model_asset": str(context_binary_file),
+        "model_name": str(model_name),
+    }
+    spec.setdefault("operators", []).append(op)
+
+    # Ensure output tensors exist and are marked as placeholders (downstream IO)
+    tensors = spec.setdefault("tensors", {})
+    for output, info in zip(model_output, model_output_tensor_info):
+        name = output["tensor"]
+        assert name not in tensors
+        tensors[name] = {
+            "dimensions": info["dimensions"],
+            "channels": info["channels"],
+            "data_type": convert_from_dtype(info["data_type"]),
+            "is_placeholder": True,
+            "usage": 2,
+        }
+        if "outputs" in spec:
+            spec["outputs"].append(name)
+
+    for input_ in model_input:
+        name = input_["tensor"]
+        if name in tensors:
+            tensors[name]["is_placeholder"] = False
+        if "inputs" in spec and name in spec["outputs"]:
+            spec["outputs"].remove(name)
 
 
 class DeserializedPipeline:

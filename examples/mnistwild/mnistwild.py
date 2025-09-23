@@ -15,14 +15,21 @@
 """Example implementation of MNIST classification in the wild."""
 
 import json
+import os
 import pathlib
 import cv2
 import numpy as np
 import securemr as smr
-from securemr.serialization import Pipeline, DeserializedPipeline
+from securemr.serialization import (
+    Pipeline,
+    DeserializedPipeline,
+    add_vst_operator,
+    add_model_inference_operator,
+    mat_flag,
+)
 
 ROOT = pathlib.Path(__file__).parent.resolve()
-PIPE_JSON = str(ROOT / "mnistwild_preprocess.json")
+PIPE_JSON = str(ROOT / "mnist_pipeline.json")
 
 
 def preprocess(image_path):
@@ -163,17 +170,11 @@ def preprocess_pipeline(image_path: str):
     t_affine = smr.TensorMat.from_numpy(np.zeros((2, 3), dtype=np.float32))
 
     # Use from_numpy to ensure placeholder flags with dtype+channels match
-    t_y1 = smr.TensorMat.from_numpy(np.zeros((crop_height, crop_width, 1), dtype=np.uint8))
-    t_y2 = smr.TensorMat.from_numpy(np.zeros((crop_height, crop_width, 1), dtype=np.uint8))
-    t_y3 = smr.TensorMat.from_numpy(np.zeros((crop_height, crop_width, 1), dtype=np.float32))
     t_y4 = smr.TensorMat.from_numpy(np.zeros((crop_height, crop_width, 1), dtype=np.float32))
+    t_y5 = smr.TensorMat.from_numpy(np.zeros((crop_height, crop_width, 3), dtype=np.uint8))
 
     # Build pipeline
     p = Pipeline()
-
-    # Flags matching TensorMat/TensorPoint placeholders (omit channel bits)
-    def _mat_flag(dtype: smr.EDataType, channels: int) -> int:
-        return int(dtype) | smr.BaseType.MAT | (smr.BaseType.CHANNEL_MASK & channels)
 
     # Flags for POINT_2 tensors: keep POINT_2 bit; backend infers float32
     def _pt2_flag(is_placeholder=False) -> int:
@@ -183,17 +184,18 @@ def preprocess_pipeline(image_path: str):
             return int(smr.EDataType.FLOAT32) | int(smr.BaseType.POINT_2)
 
     # Only inputs/outputs are placeholders; intermediates are local tensors
-    ph_img = p.allocate_placeholder(list(img.shape[:2]), _mat_flag(smr.EDataType.UINT8, 3), "image")
+    ph_img = p.allocate_placeholder(list(img.shape[:2]), mat_flag(smr.EDataType.UINT8, 3), "image")
     # src_points/dst_points should be local tensors (constants)
     ph_src = p.allocate_local_tensor([3], _pt2_flag(), "src_points", value=src_points.numpy())
     ph_dst = p.allocate_local_tensor([3], _pt2_flag(), "dst_points", value=dst_points.numpy())
     # local tensors for intermediate results
-    ph_aff = p.allocate_local_tensor([2, 3], _mat_flag(smr.EDataType.FLOAT32, 1), "affine")
-    ph_y1 = p.allocate_local_tensor([crop_height, crop_width], _mat_flag(smr.EDataType.UINT8, 1), "y1")
-    ph_y2 = p.allocate_local_tensor([crop_height, crop_width], _mat_flag(smr.EDataType.UINT8, 1), "y2")
-    ph_y3 = p.allocate_local_tensor([crop_height, crop_width], _mat_flag(smr.EDataType.FLOAT32, 1), "y3")
+    ph_aff = p.allocate_local_tensor([2, 3], mat_flag(smr.EDataType.FLOAT32, 1), "affine")
+    ph_y1 = p.allocate_local_tensor([crop_height, crop_width], mat_flag(smr.EDataType.UINT8, 3), "crop_rgb_tensor")
+    ph_y2 = p.allocate_local_tensor([crop_height, crop_width], mat_flag(smr.EDataType.UINT8, 1), "crop_gray_tensor")
+    ph_y3 = p.allocate_local_tensor([crop_height, crop_width], mat_flag(smr.EDataType.FLOAT32, 1), "crop_float_tensor")
     # output remains a placeholder, so caller can fetch result
-    ph_y4 = p.allocate_placeholder([crop_height, crop_width], _mat_flag(smr.EDataType.FLOAT32, 1), "y4")
+    ph_y4 = p.allocate_placeholder([crop_height, crop_width], mat_flag(smr.EDataType.FLOAT32, 1), "normalized_input_tensor")
+    ph_y5 = p.allocate_placeholder([crop_height, crop_width], mat_flag(smr.EDataType.UINT8, 3), "cropped_image")
 
     # Query local tensors for wiring operators
     lt_img = p.query_local_tensor(ph_img)
@@ -206,13 +208,15 @@ def preprocess_pipeline(image_path: str):
     lt_y2 = p.query_local_tensor(ph_y2)
     lt_y3 = p.query_local_tensor(ph_y3)
     lt_y4 = p.query_local_tensor(ph_y4)
+    lt_y5 = p.query_local_tensor(ph_y5)
 
     # Operators
-    op_get_aff = p.allocate_operator(smr.EOperatorType.GET_AFFINE)
+    op_get_aff = p.allocate_operator(smr.EOperatorType.GET_AFFINE, )
     op_apply_aff = p.allocate_operator(smr.EOperatorType.APPLY_AFFINE)
     op_cvt_gray = p.allocate_operator(smr.EOperatorType.CONVERT_COLOR, [str(cv2.COLOR_BGR2GRAY)])
     op_assign = p.allocate_operator(smr.EOperatorType.ASSIGNMENT)
     op_div255 = p.allocate_operator(smr.EOperatorType.ARITHMETIC_COMPOSE, ["{0} / 255.0"])
+    op_assign_2 = p.allocate_operator(smr.EOperatorType.ASSIGNMENT)
 
     # Connect: GET_AFFINE(src,dst)->affine
     op_get_aff = p.query_operator(op_get_aff)
@@ -235,6 +239,11 @@ def preprocess_pipeline(image_path: str):
     op_assign = p.query_operator(op_assign)
     op_assign.data_as_operand(lt_y2, 0)
     op_assign.connect_result_to_data_array(0, lt_y3)
+    
+    # ASSIGNMENT(uint8->uint8, local_tensor to global tensor)
+    op_assign_2 = p.query_operator(op_assign_2)
+    op_assign_2.data_as_operand(lt_img, 0)
+    op_assign_2.connect_result_to_data_array(0, lt_y5)
 
     # ARITHMETIC_COMPOSE(y3/255.0)->y4
     op_div255 = p.query_operator(op_div255)
@@ -244,12 +253,13 @@ def preprocess_pipeline(image_path: str):
     # Map placeholders to global tensors and run
     # Declare pipeline IO for serialization/deserialization convenience (use names)
     p.set_inputs(["image"])  # only true inputs are placeholders
-    p.set_outputs(["y4"])    # output as placeholder for retrieval
+    p.set_outputs(["normalized_input_tensor", "cropped_image"])    # output as placeholder for retrieval
 
     # Map only placeholder tensors (inputs/outputs)
     ph_map = {
         int(ph_img): t_img,
         int(ph_y4): t_y4,
+        int(ph_y5): t_y5,
     }
 
     # Print placeholder (key) and tensor (value) data types for debugging
@@ -281,9 +291,8 @@ def preprocess_pipeline(image_path: str):
             break
         _time.sleep(0.01)
     
-    # Attach constant values for non-placeholder saving
-    p.save(PIPE_JSON)
-    return t_y4
+    return t_y4, p
+
 
 def main():
     """Run the MNIST wild example.
@@ -292,13 +301,16 @@ def main():
     """
     test_image = ROOT / "number_5.png"
 
-    x = preprocess_pipeline(str(test_image)).numpy()[:,:,0]
+    x, pipeline = preprocess_pipeline(str(test_image))
+    x = x.numpy()[:,:,0]
     
     x0 = preprocess(str(test_image)).numpy()[:,:,0]
     assert np.allclose(x, x0, rtol=1e-4, atol=1e-4)
 
-    restored_pipeline = DeserializedPipeline(PIPE_JSON)
-    x2 = restored_pipeline(cv2.imread(str(test_image))).numpy()[:,:,0]
+    pipeline.save("/tmp/tmp_pipeline.json")
+    restored_pipeline = DeserializedPipeline("/tmp/tmp_pipeline.json")
+    x2, _ = restored_pipeline(cv2.imread(str(test_image)))
+    x2 = x2.numpy()[:,:,0]
     assert np.allclose(x, x2, rtol=1e-4, atol=1e-4)
 
     context_binary_file = ROOT / "mnist.serialized.bin"
@@ -310,6 +322,22 @@ def main():
     score, idx = model(x, is_nhwc=True)
     print("number: ", int(idx.squeeze()))
     print("score: ", score.squeeze())
+
+    # Add vst and model operator into pipeline
+    add_vst_operator(pipeline, ("image", "left_rgb"))
+    add_model_inference_operator(
+            pipeline,
+            context_binary_file=os.path.basename(context_binary_file),
+            model_name="mnist",
+            model_input=[{"name": "input_1", "tensor": "normalized_input_tensor"}],
+            model_output=[
+                {"name": "_538", "tensor": "predicted_score"},
+                {"name": "_539", "tensor": "predicted_class"}],
+            model_output_tensor_info=[
+                {"dimensions": [1], "channels": 1, "data_type": np.float32},
+                {"dimensions": [1], "channels": 1, "data_type": np.int32}]
+            )
+    pipeline.save(PIPE2_JSON)
 
 
 if __name__ == "__main__":
