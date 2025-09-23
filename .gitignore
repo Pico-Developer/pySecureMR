@@ -57,3 +57,5 @@ plugins/k8s_submit/*.yaml
 docs/_build
 !docs/Makefile
 !docs/source/_static/*.png
+
+examples/mnistwild/mnistwild_preprocess_vis.html
