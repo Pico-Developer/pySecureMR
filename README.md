@@ -107,6 +107,12 @@ Run pytorch-to-qnn test and run on android device.
 python3 -m securemr.test_pytorch_to_qnn
 ```
 
+Visualize pipeline json
+
+```
+python3 -m securemr.viz.pipeline_viz path-to-pipeline.json
+```
+
 ## How to contribute
 
 Before coding, please install develop related tools by:

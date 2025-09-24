@@ -318,7 +318,7 @@ class Pipeline(smr.Pipeline):
         }
         # map attrs into named fields for known ops
         if attrs:
-            # TODO: suppport more operators
+            # TODO: support more operators
             if op_type == smr.EOperatorType.CONVERT_COLOR and len(attrs) >= 1:
                 try:
                     op_entry["flag"] = int(attrs[0])
@@ -326,6 +326,12 @@ class Pipeline(smr.Pipeline):
                     op_entry["flag"] = str(attrs[0])
             elif op_type == smr.EOperatorType.ARITHMETIC_COMPOSE and len(attrs) >= 1:
                 op_entry["expression"] = str(attrs[0])
+            elif op_type == smr.EOperatorType.NMS and len(attrs) >= 1:
+                # record IoU threshold for reconstruction
+                try:
+                    op_entry["threshold"] = float(attrs[0])
+                except Exception:
+                    op_entry["threshold"] = str(attrs[0])
         self.spec["operators"].append(op_entry)
         return oid
 
@@ -685,6 +691,13 @@ class DeserializedPipeline:
                 attrs = [str(op.get("flag"))]
             if "expression" in op:
                 attrs = [str(op.get("expression"))]
+            if str(type_name).lower() == "nms" and "threshold" in op:
+                attrs = [str(op.get("threshold"))]
+            if str(type_name).lower() == "sort_mat":
+                # mode can be COLUMN/ROW etc.; default to COLUMN if provided
+                mode = op.get("mode") or op.get("axis")
+                if mode is not None:
+                    attrs = [str(mode)]
             oid = self.pipeline.allocate_operator(name_to_type(type_name), attrs)
             proxy = self.pipeline.query_operator(oid)
             for idx, name in enumerate(op.get("inputs", [])):
@@ -697,6 +710,34 @@ class DeserializedPipeline:
                     continue
                 tid = self._name_to_id[name]
                 proxy.connect_result_to_data_array(idx, self.pipeline.query_local_tensor(tid))
+
+            # Special handling: ASSIGNMENT slices wiring
+            if str(type_name).lower() == "assignment":
+                src_slices = op.get("src_slices")
+                dst_slices = op.get("dst_slices")
+                if src_slices is not None:
+                    # Build vec2 list with [[row_start,row_end],[col_start,col_end]]
+                    arr = np.array(src_slices, dtype=np.int32)
+                    vec = smr.TensorFactory.create([2], int(smr.EDataType.INT32) | smr.BaseType.VEC_2)
+                    if hasattr(vec, 'load_from_raw_byte_arrays'):
+                        vec.load_from_raw_byte_arrays(np.ascontiguousarray(arr).tobytes())
+                    proxy.data_as_operand(vec, 1)
+                if dst_slices is not None:
+                    arr = np.array(dst_slices, dtype=np.int32)
+                    vec = smr.TensorFactory.create([2], int(smr.EDataType.INT32) | smr.BaseType.VEC_2)
+                    if hasattr(vec, 'load_from_raw_byte_arrays'):
+                        vec.load_from_raw_byte_arrays(np.ascontiguousarray(arr).tobytes())
+                    proxy.data_as_operand(vec, 3)
+
+                # Support dynamic slice tensors referenced by name
+                src_slices_tensor = op.get("src_slices_tensor")
+                if src_slices_tensor is not None:
+                    tid = self._name_to_id[src_slices_tensor]
+                    proxy.data_as_operand(self.pipeline.query_local_tensor(tid), 1)
+                dst_slices_tensor = op.get("dst_slices_tensor")
+                if dst_slices_tensor is not None:
+                    tid = self._name_to_id[dst_slices_tensor]
+                    proxy.data_as_operand(self.pipeline.query_local_tensor(tid), 3)
 
     def _create_backing_tensors(self) -> None:
         tensors = self.pipeline_spec.get("tensors", {})

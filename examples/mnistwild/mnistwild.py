@@ -337,7 +337,7 @@ def main():
                 {"dimensions": [1], "channels": 1, "data_type": np.float32},
                 {"dimensions": [1], "channels": 1, "data_type": np.int32}]
             )
-    pipeline.save(PIPE2_JSON)
+    pipeline.save(PIPE_JSON)
 
 
 if __name__ == "__main__":
