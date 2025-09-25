@@ -125,7 +125,8 @@ def get_file_basename(filename: str, remove_ext=True) -> str:
 
     Example:
         >>> path = '/opt/tiger/a.md'
-        >>> get_file_basename(path) # return a
+        >>> get_file_basename(path)
+        'a'
     """
     basename = os.path.basename(filename)
     if not remove_ext:

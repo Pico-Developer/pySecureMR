@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
 import securemr
 from securemr import TORCH_INSTALLED
 
@@ -26,8 +28,12 @@ if TORCH_INSTALLED:
 
 np.set_printoptions(precision=4, suppress=True)
 
+QNN_SDK_ROOT = os.getenv("QNN_SDK_ROOT")
+QNN_AVAILABLE = bool(QNN_SDK_ROOT)
+
 
 @pytest.mark.skipif(not TORCH_INSTALLED, reason="torch is required")
+@pytest.mark.skipif(not QNN_AVAILABLE, reason="QNN SDK environment not configured")
 def test_host():
     torch_model = models.resnet18(pretrained=True)
     torch_model.eval()
@@ -42,6 +48,7 @@ def test_host():
 
 
 @pytest.mark.skipif(not TORCH_INSTALLED, reason="torch is required")
+@pytest.mark.skipif(not QNN_AVAILABLE, reason="QNN SDK environment not configured")
 def test_android():
     torch_model = models.resnet18(pretrained=True)
     torch_model.eval()

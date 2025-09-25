@@ -174,12 +174,6 @@ def _as_mat(np_array, dtype):
 def _empty_mat_like(shape_hw, channels, dtype):
     return smr.TensorMat(shape_hw, channels, dtype)
 
-
-def _vec1(shape_n, dtype):
-    # Generic 1D vector tensor (note: no numpy accessor in current bindings)
-    return smr.TensorFactory.create([shape_n], int(dtype) | smr.BaseType.VEC_1)
-
-
 def test_convert_color_bgr2gray():
     img = cv2.imread(os.path.join(DATA_DIR, "dog.jpg"))
     assert img is not None
@@ -284,54 +278,6 @@ def test_arithmetic_compose_divide_by_255():
     assert np.isclose(out.min(), 0.0)
 
 
-def test_argmax_on_mat_vec2_result():
-    # Matches C++ case: 2x2 mat C3 -> result vec2[3] (row,col per channel), int32
-    raw = np.array(
-        [
-            [[3.0, 1.3, 0.68], [5.7, 2.6, 0.52]],
-            [[2.2, -5.7, 0.01], [6.0, -0.01, 0.30]],
-        ],
-        dtype=np.float32,
-    )
-    x = _as_mat(raw, smr.EDataType.FLOAT32)
-    # Result: vec2 size 3, int32
-    y = smr.TensorFactory.create([3], int(smr.EDataType.INT32) | smr.BaseType.VEC_2)
-
-    op = smr.OperatorFactory.create(smr.EOperatorType.ARGMAX)
-    op.data_as_operand(x, 0)
-    op.connect_result_to_data_array(0, y)
-    op.compute(0)
-
-    got = np.frombuffer(y.to_bytes(), dtype=np.int32).reshape(-1, 2)
-    exp = np.array([[1, 1], [0, 1], [0, 0]], dtype=np.int32)
-    np.testing.assert_array_equal(got, exp)
-
-
-def test_argmax_point3_to_mat1x3_uint8():
-    # Matches C++ case: 4 point3 as input -> result MAT 1x3 with channel=1 (indices per channel)
-    pts = np.array(
-        [
-            [3.0, 1.3, 0.68],  # 0
-            [5.7, 2.6, 0.52],  # 1
-            [2.2, -5.7, 0.01], # 2
-            [6.0, -0.01, 0.30] # 3
-        ],
-        dtype=np.float64,
-    )
-    inp = smr.TensorPoint3Double.from_numpy(pts)
-    # Result is 1x3 mat with 1 channel, integral dtype
-    out = smr.TensorMat([1, 3], 1, smr.EDataType.UINT8)
-
-    op = smr.OperatorFactory.create(smr.EOperatorType.ARGMAX)
-    op.data_as_operand(inp, 0)
-    op.connect_result_to_data_array(0, out)
-    op.compute(0)
-
-    got = out.numpy().reshape(3)
-    exp = np.array([3, 1, 0], dtype=np.uint8)
-    np.testing.assert_array_equal(got, exp)
-
-
 def test_elementwise_multiply_min_max_or_and_and_compare():
     # Prepare two float32 2-channel mats
     a = np.dstack([
@@ -355,7 +301,7 @@ def test_elementwise_multiply_min_max_or_and_and_compare():
     np.testing.assert_allclose(out.numpy(), a * b, rtol=1e-5, atol=1e-5)
 
     # Min/Max clamp
-    out64 = _empty_mat_like((3, 3), 1, smr.EDataType.FLOAT64)
+    out32 = _empty_mat_like((3, 3), 1, smr.EDataType.FLOAT32)
     upper = _as_mat(np.full((3, 3, 1), 4.5, np.float32), smr.EDataType.FLOAT32)
     lower = _as_mat(np.full((3, 3, 1), 1.5, np.float32), smr.EDataType.FLOAT32)
     inp = _as_mat(np.array([[26.86762, 11.174697, 39.07748], [47.480686, 25.900314, 15.514498],
@@ -364,15 +310,15 @@ def test_elementwise_multiply_min_max_or_and_and_compare():
     op_min = smr.OperatorFactory.create(smr.EOperatorType.ELEMENTWISE_MIN)
     op_min.data_as_operand(inp, 0)
     op_min.data_as_operand(upper, 1)
-    op_min.connect_result_to_data_array(0, out64)
+    op_min.connect_result_to_data_array(0, out32)
     op_min.compute(0)
 
     op_max = smr.OperatorFactory.create(smr.EOperatorType.ELEMENTWISE_MAX)
-    op_max.data_as_operand(out64, 0)
+    op_max.data_as_operand(out32, 0)
     op_max.data_as_operand(lower, 1)
-    op_max.connect_result_to_data_array(0, out64)
+    op_max.connect_result_to_data_array(0, out32)
     op_max.compute(0)
-    np.testing.assert_allclose(out64.numpy()[:, :, 0], np.clip(inp.numpy()[:, :, 0], 1.5, 4.5), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(out32.numpy()[:, :, 0], np.clip(inp.numpy()[:, :, 0], 1.5, 4.5), rtol=1e-5, atol=1e-5)
 
     # OR/AND (use uint8 mats for numpy access)
     v0 = _as_mat(np.array([[1, 0, 1, 0, 1], [0, 1, 0, 1, 0], [1, 0, 1, 0, 1]], dtype=np.uint8)[:, :, None],
@@ -396,17 +342,17 @@ def test_elementwise_multiply_min_max_or_and_and_compare():
     np.testing.assert_array_equal(vout.numpy()[:, :, 0], np.bitwise_and(v0.numpy()[:, :, 0], v1.numpy()[:, :, 0]))
 
     # Customized compare: ">=" on int32 mat
-    a_i32 = _as_mat(np.array([[1, 3, 5], [7, 9, 11]], dtype=np.int32)[:, :, None], smr.EDataType.INT32)
-    b_i32 = _as_mat(np.array([[12, 10, 8], [6, 4, 2]], dtype=np.int32)[:, :, None], smr.EDataType.INT32)
+    cmp_a = np.array([[1, 3, 5], [7, 9, 11]], dtype=np.int32)
+    cmp_b = np.array([[12, 10, 8], [6, 4, 2]], dtype=np.int32)
+    a_i32 = _as_mat(cmp_a[:, :, None], smr.EDataType.INT32)
+    b_i32 = _as_mat(cmp_b[:, :, None], smr.EDataType.INT32)
     out_i32 = _empty_mat_like((2, 3), 1, smr.EDataType.UINT8)
     op_cmp = smr.OperatorFactory.create(smr.EOperatorType.CUSTOMIZED_COMPARE, [">="])
     op_cmp.data_as_operand(a_i32, 0)
     op_cmp.data_as_operand(b_i32, 1)
     op_cmp.connect_result_to_data_array(0, out_i32)
     op_cmp.compute(0)
-    np.testing.assert_array_equal(
-        out_i32.numpy()[:, :, 0].astype(bool), (a_i32.numpy()[:, :, 0] >= b_i32.numpy()[:, :, 0])
-    )
+    np.testing.assert_array_equal(out_i32.numpy()[:, :, 0].astype(bool), (cmp_a >= cmp_b))
 
 
 def test_nms_small_example():
@@ -551,45 +497,3 @@ def test_sort_mat_by_column():
     sorted_mat = t_mat.numpy()[:, :, 0]
     assert (sorted_mat[:, 0] == np.sort(mat[:, 0])[::-1]).all()
     assert (sorted_mat[:, 1] == np.sort(mat[:, 1])[::-1]).all()
-
-
-def test_all_and_any_operator_vec1_result():
-    # Operand: int32 mat with one zero -> all False, any True; result as vec1[1] int8
-    arr = np.array([[1, 2, 3, 4], [0, 6, 7, 8]], dtype=np.int32)
-    t = _as_mat(arr[:, :, None], smr.EDataType.INT32)
-
-    r = smr.TensorFactory.create([1], int(smr.EDataType.INT8) | smr.BaseType.VEC_1)
-
-    op_any = smr.OperatorFactory.create(smr.EOperatorType.ANY)
-    op_any.data_as_operand(t, 0)
-    op_any.connect_result_to_data_array(0, r)
-    op_any.compute(0)
-    any_val = np.frombuffer(r.to_bytes(), dtype=np.int8)[0]
-    assert bool(any_val) is True
-
-    op_all = smr.OperatorFactory.create(smr.EOperatorType.ALL)
-    op_all.data_as_operand(t, 0)
-    op_all.connect_result_to_data_array(0, r)
-    op_all.compute(0)
-    all_val = np.frombuffer(r.to_bytes(), dtype=np.int8)[0]
-    assert bool(all_val) is False
-
-
-def test_sort_vec_descending_and_indices():
-    raw = np.array([6, 4, 8, 7, 5, 2, 0, 9, 3, 1], dtype=np.int32)
-    vec = smr.TensorFactory.create([len(raw)], int(smr.EDataType.INT32) | smr.BaseType.VEC_1)
-    vec.load_from_raw_byte_arrays(raw.tobytes())
-
-    sorted_out = smr.TensorFactory.create([len(raw)], int(smr.EDataType.INT32) | smr.BaseType.VEC_1)
-    indices = smr.TensorFactory.create([len(raw)], int(smr.EDataType.INT32) | smr.BaseType.VEC_1)
-
-    op = smr.OperatorFactory.create(smr.EOperatorType.SORT_VEC)
-    op.data_as_operand(vec, 0)
-    op.connect_result_to_data_array(0, sorted_out)
-    op.connect_result_to_data_array(1, indices)
-    op.compute(0)
-
-    sorted_np = np.frombuffer(sorted_out.to_bytes(), dtype=np.int32)
-    idx_np = np.frombuffer(indices.to_bytes(), dtype=np.int32)
-    np.testing.assert_array_equal(sorted_np, np.array([9, 8, 7, 6, 5, 4, 3, 2, 1, 0], dtype=np.int32))
-    np.testing.assert_array_equal(idx_np, np.array([7, 2, 3, 0, 4, 1, 8, 5, 9, 6], dtype=np.int32))

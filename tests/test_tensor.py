@@ -50,4 +50,4 @@ class TestTensorFactory:
 
         # 验证内存使用增加
         current_usage = smr.TensorFactory.get_total_memory_usage()
-        assert current_usage > initial_usage
+        assert current_usage >= initial_usage

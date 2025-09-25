@@ -7,24 +7,20 @@ import securemr as smr
 
 
 def _float_tensor_from_numpy(arr: np.ndarray) -> smr.Tensor:
-    # dtype flag: BaseType.MAT | channels, plus EDataType.FLOAT32
-    channels = 1 if arr.ndim == 2 else arr.shape[2]
-    flag = int(smr.EDataType.FLOAT32) | smr.BaseType.MAT | (smr.BaseType.CHANNEL_MASK & channels)
-    t = smr.TensorFactory.create(list(arr.shape[:2]), flag)
-    t.load_from_raw_byte_arrays(np.ascontiguousarray(arr.astype(np.float32)).tobytes())
-    return t
-
-
-def _tensor_to_numpy(t: smr.Tensor, shape_hw) -> np.ndarray:
-    raw = t.to_bytes()
-    arr = np.frombuffer(raw, dtype=np.float32)
-    return arr.reshape(*shape_hw)
+    arr32 = np.ascontiguousarray(arr.astype(np.float32))
+    if arr32.ndim == 2:
+        arr32 = arr32[:, :, None]
+    channels = arr32.shape[2]
+    flag = int(smr.EDataType.FLOAT32) | int(smr.BaseType.MAT) | (int(smr.BaseType.CHANNEL_MASK) & channels)
+    tensor = smr.TensorFactory.create(list(arr32.shape[:2]), flag)
+    tensor.load_from_raw_byte_arrays(arr32.tobytes())
+    return tensor
 
 
 def test_pipeline_arithmetic_add_scalar():
     # Create a simple pipeline: out = in + 2.0
     input_shape = [4, 4]
-    flag = int(smr.EDataType.FLOAT32) | smr.BaseType.MAT | (smr.BaseType.CHANNEL_MASK & 1)
+    flag = int(smr.EDataType.FLOAT32) | int(smr.BaseType.MAT) | (int(smr.BaseType.CHANNEL_MASK) & 1)
 
     # Global tensors backing the placeholders
     input_np = np.array(
@@ -73,5 +69,6 @@ def test_pipeline_arithmetic_add_scalar():
             break
         time.sleep(0.01)
 
-    out_np = _tensor_to_numpy(global_output, input_shape)
+    out_view = global_output.numpy()
+    out_np = out_view[:, :, 0] if out_view.ndim == 3 else out_view
     assert np.allclose(out_np, expected_np, rtol=1e-4, atol=1e-4)
