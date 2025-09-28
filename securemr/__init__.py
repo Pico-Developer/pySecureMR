@@ -52,8 +52,6 @@ from ._bindings._securemr import (
     TensorScalarInt8,
     TensorScalarUInt16,
     TensorScalarUInt8,
-    TensorSliceDouble,
-    TensorSliceFloat,
     TensorSliceInt16,
     TensorSliceInt32,
     TensorSliceInt8,
@@ -66,13 +64,7 @@ from ._bindings._securemr import (
     TensorColorInt8,
     TensorColorUInt16,
     TensorColorUInt8,
-    TensorTimestampDouble,
-    TensorTimestampFloat,
-    TensorTimestampInt16,
     TensorTimestampInt32,
-    TensorTimestampInt8,
-    TensorTimestampUInt16,
-    TensorTimestampUInt8,
 )
 
 # isort: on

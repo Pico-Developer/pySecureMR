@@ -30,7 +30,11 @@ import securemr as smr
 import re
 
 
-__all__ = ["Pipeline", "DeserializedPipeline", "add_vst_operator", "add_model_inference_operator"]
+__all__ = ["Pipeline",
+           "DeserializedPipeline",
+           "add_vst_operator",
+           "add_model_inference_operator",
+           ]
 
 SPEC_VERSION = "1.0.0"
 
@@ -318,6 +322,7 @@ class Pipeline(smr.Pipeline):
         }
         # map attrs into named fields for known ops
         if attrs:
+            op_entry["attrs"] = [str(a) for a in attrs]
             # TODO: support more operators
             if op_type == smr.EOperatorType.CONVERT_COLOR and len(attrs) >= 1:
                 try:
@@ -652,8 +657,16 @@ def add_model_inference_operator(
 
 
 class DeserializedPipeline:
-    """Load a Pipeline.save JSON and run it (mnist-style keys)."""
-    def __init__(self, json_or_path: Union[str, Dict[str, Any]]):
+    """Load a Pipeline.save JSON and run it (mnist-style keys).
+
+    Args:
+        json_or_path: JSON dictionary or path to the serialized pipeline.
+    """
+
+    def __init__(
+        self,
+        json_or_path: Union[str, Dict[str, Any]],
+    ):
         if isinstance(json_or_path, str) and os.path.exists(json_or_path):
             with open(json_or_path, 'r', encoding='utf-8') as f:
                 self.pipeline_spec = json.load(f)
@@ -669,7 +682,6 @@ class DeserializedPipeline:
         self.placeholder_map: Dict[int, smr.Tensor] = {}
         self._create_backing_tensors()
 
-
     def _build_graph(self) -> None:
         tensors = self.pipeline_spec.get("tensors", {})
         for name, t in tensors.items():
@@ -684,20 +696,21 @@ class DeserializedPipeline:
                 new_id = int(self.pipeline.allocate_local_tensor(dims, flag))
             self._name_to_id[name] = new_id
 
-        for op in self.pipeline_spec.get("operators", []):
+        for op_idx, op in enumerate(self.pipeline_spec.get("operators", [])):
             type_name = op.get("type")
-            attrs: List[str] = []
-            if "flag" in op:
-                attrs = [str(op.get("flag"))]
-            if "expression" in op:
-                attrs = [str(op.get("expression"))]
-            if str(type_name).lower() == "nms" and "threshold" in op:
-                attrs = [str(op.get("threshold"))]
-            if str(type_name).lower() == "sort_mat":
-                # mode can be COLUMN/ROW etc.; default to COLUMN if provided
-                mode = op.get("mode") or op.get("axis")
-                if mode is not None:
-                    attrs = [str(mode)]
+            attrs: List[str] = [str(a) for a in op.get("attrs", [])]
+            if not attrs:
+                if "flag" in op:
+                    attrs = [str(op.get("flag"))]
+                if "expression" in op:
+                    attrs = [str(op.get("expression"))]
+                if str(type_name).lower() == "nms" and "threshold" in op:
+                    attrs = [str(op.get("threshold"))]
+                if str(type_name).lower() == "sort_mat":
+                    # mode can be COLUMN/ROW etc.; default to COLUMN if provided
+                    mode = op.get("mode") or op.get("axis")
+                    if mode is not None:
+                        attrs = [str(mode)]
             oid = self.pipeline.allocate_operator(name_to_type(type_name), attrs)
             proxy = self.pipeline.query_operator(oid)
             for idx, name in enumerate(op.get("inputs", [])):
