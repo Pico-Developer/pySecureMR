@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Iterable, List, Optional, Sequence
+from typing import Iterable, List, Optional, Sequence, Dict
 
 from .._bindings import _securemr
+
+
+_TOKEN_TO_IMPLEMENTATION: Dict[str, "CustomOperatorBase"] = {}
 
 
 class CustomOperatorHandle:
@@ -15,6 +18,8 @@ class CustomOperatorHandle:
         self._implementation = implementation
         self._token: Optional[str] = _securemr.register_custom_operator(implementation)
         self._released = False
+        if self._token is not None:
+            _TOKEN_TO_IMPLEMENTATION[self._token] = implementation
 
     @property
     def token(self) -> str:
@@ -30,6 +35,8 @@ class CustomOperatorHandle:
             return
         _securemr.release_custom_operator(self._token)
         self._released = True
+        if self._token in _TOKEN_TO_IMPLEMENTATION:
+            _TOKEN_TO_IMPLEMENTATION.pop(self._token, None)
         self._token = None
 
     def __enter__(self) -> "CustomOperatorHandle":
@@ -93,3 +100,9 @@ def create_operator_configs(operator: CustomOperatorBase) -> List[str]:
 
     handle = operator.register()
     return handle.configs()
+
+
+def get_registered_custom_operator(token: str) -> Optional[CustomOperatorBase]:
+    """Return the Python implementation previously registered for ``token``."""
+
+    return _TOKEN_TO_IMPLEMENTATION.get(token)

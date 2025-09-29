@@ -1,9 +1,11 @@
 import time
+import json
 
 import numpy as np
 
 import securemr as smr
 from securemr.operators import CustomOperatorBase, create_operator_configs
+from securemr.serialization import Pipeline as SerializablePipeline, DeserializedPipeline
 
 
 class _AddOperator(CustomOperatorBase):
@@ -102,5 +104,45 @@ def test_custom_operator_roundtrip():
         assert implementation.task_ids == [task.id]
         assert implementation.verified_operands == [0, 1]
         assert implementation.verified_results == [0]
+    finally:
+        implementation.release()
+
+
+def test_custom_operator_serialization_roundtrip():
+    implementation = _AddOperator()
+    configs = create_operator_configs(implementation)
+
+    try:
+        flag = _make_scalar(0.0).get_type_flag()
+
+        pipeline = SerializablePipeline()
+
+        lhs_id = pipeline.allocate_placeholder([1, 1], flag, name="lhs")
+        rhs_id = pipeline.allocate_placeholder([1, 1], flag, name="rhs")
+        out_id = pipeline.allocate_placeholder([1, 1], flag, name="out")
+
+        op_id = pipeline.allocate_operator(smr.EOperatorType.PYTHON_CUSTOM, configs)
+        proxy = pipeline.query_operator(op_id)
+        proxy.data_as_operand(pipeline.query_local_tensor(lhs_id), 0)
+        proxy.data_as_operand(pipeline.query_local_tensor(rhs_id), 1)
+        proxy.connect_result_to_data_array(0, pipeline.query_local_tensor(out_id))
+
+        pipeline.set_inputs(["lhs", "rhs"])
+        pipeline.set_outputs(["out"])
+
+        spec_snapshot = json.loads(json.dumps(pipeline.spec))
+
+        deserialized = DeserializedPipeline(spec_snapshot)
+        try:
+            lhs = np.array([[3.0]], dtype=np.float32)
+            rhs = np.array([[4.0]], dtype=np.float32)
+
+            result_tensor = deserialized({"lhs": lhs, "rhs": rhs})
+            output = result_tensor.numpy()
+
+            assert np.allclose(output.squeeze(), 7.0)
+            assert implementation.task_ids, "compute should have been invoked"
+        finally:
+            deserialized.close()
     finally:
         implementation.release()

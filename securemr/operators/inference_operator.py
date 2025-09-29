@@ -114,25 +114,23 @@ class ModelInferenceOperator(PyOperatorBase, CustomOperatorBase):
                 self._backend = "ort"
         else:
             raise NotImplementedError("Unsupported model format. Expect .onnx or .bin")
+        
+        # TODO: fix -1 hardcode
+        self._output_shapes = self._model.output_shapes
 
     def forward(self, stream_id: int = 0) -> None:
         self.compute(stream_id, self._operands, self._results)
 
-    def set_expected_shapes(
-        self,
-        output_shape: Tuple[int, ...],
-        tensor_layout_shape: Tuple[int, ...],
-    ) -> None:
-        self._output_shape = tuple(int(s) for s in output_shape)
-        self._tensor_layout_shape = tuple(int(s) for s in tensor_layout_shape)
-
     @property
-    def output_shape(self) -> Optional[Tuple[int, ...]]:
-        return self._output_shape
+    def output_shapes(self) -> Optional[Tuple[int, ...]]:
+        return self._output_shapes
 
-    @property
-    def tensor_layout_shape(self) -> Optional[Tuple[int, ...]]:
-        return self._tensor_layout_shape
+    def shape_to_output_tensor(self, shape) -> Tuple[List[int], int]:
+        """Convert output shape to tensor layout."""
+        # set tensor layout shape for output tensor creation
+        out_shape = shape[:2] 
+        out_channels = int(shape[2]) if len(shape) >= 3 else 1
+
 
     def compute(self, task_id: int, operands, results) -> None:
         if not operands:
@@ -142,21 +140,15 @@ class ModelInferenceOperator(PyOperatorBase, CustomOperatorBase):
         prepared = self._prepare_input(input_tensor)
         y_np = self.forward_numpy(prepared)
 
-        if self._output_shape is None:
-            self._output_shape = tuple(int(s) for s in y_np.shape)
-        if self._tensor_layout_shape is None:
-            layout_tensor = smr.TensorMat.from_numpy(y_np)
-            self._tensor_layout_shape = tuple(int(s) for s in layout_tensor.numpy().shape)
-
-        flat = np.ascontiguousarray(y_np, dtype=np.float32).reshape(-1)
-        target_shape = self._tensor_layout_shape
-        assert target_shape is not None, "tensor layout shape unavailable"
-        prepared_output = flat.reshape(target_shape)
-
-        if results and results[0] is not None and hasattr(results[0], "load_from_raw_byte_arrays"):
-            results[0].load_from_raw_byte_arrays(prepared_output.tobytes())
-        else:
-            results[0] = smr.TensorMat.from_numpy(prepared_output)
+        # assert self.output_shape is not None, "output shape unavailable"
+        # flat = np.ascontiguousarray(y_np, dtype=np.float32).reshape(-1)
+        # prepared_output = flat.reshape(self.output_shape)
+        
+        for i in range(len(results)):
+            if results and results[i] is not None and hasattr(results[i], "load_from_raw_byte_arrays"):
+                results[i].load_from_raw_byte_arrays(y_np[i].tobytes())
+            else:
+                results[i] = smr.TensorMat.from_numpy(y_np[i])
 
     def _prepare_input(self, tensor: Any) -> np.ndarray:
         arr = tensor.numpy()
@@ -168,9 +160,6 @@ class ModelInferenceOperator(PyOperatorBase, CustomOperatorBase):
             # Stored tensors are width-major; swap to height-major before layout conversion.
             arr_swapped = arr.transpose(1, 0, 2)
             prepared = arr_swapped.astype(np.float32, copy=False)
-
-        if prepared.max() > 1.0:
-            prepared = prepared / 255.0
 
         if prepared.ndim == 3:
             prepared = prepared.transpose(2, 0, 1)[None, ...]
@@ -199,9 +188,6 @@ class ModelInferenceOperator(PyOperatorBase, CustomOperatorBase):
             except Exception:
                 pass
             outputs = self._session.run(None, {self._input_name: x_np})
-            y = outputs[0]
-            if y.ndim == 3 and y.shape[0] == 1:
-                y = y[0]
         elif self._backend == "qnn":
             # QNN models commonly expect NHWC layout; convert if needed
             x_qnn = x_np
@@ -214,11 +200,6 @@ class ModelInferenceOperator(PyOperatorBase, CustomOperatorBase):
                 outputs = self._model(x_qnn, is_nhwc=self._qnn_is_nhwc)
             except Exception as e:
                 raise RuntimeError(f"QNN inference failed: {e}")
-            if isinstance(outputs, list) and len(outputs) == 4:
-                y = outputs[-1]
-            else:
-                y = outputs
-            y = y.reshape(1, -1, 20)
         else:
             raise RuntimeError("RunOnnxOperator not initialized")
 
@@ -226,20 +207,13 @@ class ModelInferenceOperator(PyOperatorBase, CustomOperatorBase):
             if isinstance(obj, np.ndarray):
                 return obj
             try:
-                return obj.detach().cpu().numpy()
+                return np.ascontiguousarray(obj.detach().cpu().numpy())
             except Exception:
                 pass
             try:
                 return np.array(obj)
             except Exception:
                 return None
-
-        y_np = _to_numpy_arr(y)
-        if y_np is None:
-            raise RuntimeError("Unable to convert model output to numpy array")
-
-        # Ensure feature dimension is last; if output comes as (F, N) transpose it
-        if y_np.ndim == 2 and y_np.shape[0] < y_np.shape[1] and y_np.shape[0] >= 19:
-            y_np = y_np.T
-
-        return np.ascontiguousarray(y_np)
+        
+        y_np = [_to_numpy_arr(yi) for yi in outputs]
+        return y_np

@@ -48,6 +48,7 @@ def get_output_node_ids(context_binary: str, QNN_SDK_ROOT: str) -> List[str]:  #
 
     Returns:
         output_ids: output index list of context binary.
+        output_shapes: output shape list of context binary.
     """
     bin_file = Path(QNN_SDK_ROOT) / "bin/x86_64-linux-clang/qnn-context-binary-utility"
 
@@ -65,9 +66,10 @@ def get_output_node_ids(context_binary: str, QNN_SDK_ROOT: str) -> List[str]:  #
         try:
             graph_outputs = data["info"]["graphs"][0]["info"]["graphOutputs"]
             output_ids = [output["info"]["name"] for output in graph_outputs]
+            output_shapes = [output["info"]["dimensions"] for output in graph_outputs]
         except KeyError as e:
             raise RuntimeError(f"Invalid JSON structure: missing key {e}")
-    return output_ids
+    return output_ids, output_shapes
 
 
 def set_host_or_android():
@@ -129,10 +131,19 @@ class QnnModel:
         cache_context_binary = os.path.join(self.temp_dir, os.path.basename(context_binary))
         shutil.copy(context_binary, cache_context_binary)
         self.context_binary = cache_context_binary
+        _output_node_ids, _output_shapes = get_output_node_ids(context_binary, self.QNN_SDK_ROOT)
         if output_node_ids is None:
-            self.output_node_ids = get_output_node_ids(context_binary, self.QNN_SDK_ROOT)
+            self.output_node_ids = _output_node_ids
+            self.output_shapes = _output_shapes
         else:
             self.output_node_ids = output_node_ids.split(",")
+            self.output_shapes = []
+            for _id in output_node_ids:
+                assert _id in _output_node_ids
+                self.output_shapes.append(
+                    _output_shapes[_output_node_ids.index(_id)]
+                    )
+
         self.set_target(target)
         self._input_shapes = None
 

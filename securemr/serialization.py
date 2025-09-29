@@ -20,6 +20,7 @@ allocated tensors, operators, and their connections, then saves/loads from JSON.
 DeserializedPipeline builds a runnable pipeline from a JSON spec saved by Pipeline.
 """
 
+import contextlib
 import json
 import os
 import typing
@@ -28,6 +29,7 @@ from typing import Dict, List, Any, Optional, Union, Iterable
 import numpy as np
 import securemr as smr
 import re
+from securemr.operators import custom_operator as custom_ops
 
 
 __all__ = ["Pipeline",
@@ -677,6 +679,7 @@ class DeserializedPipeline:
         self._name_to_id: Dict[str, int] = {}
         self._inputs_names: List[str] = as_list(self.pipeline_spec.get("inputs", []))
         self._outputs_names: List[str] = as_list(self.pipeline_spec.get("outputs", []))
+        self._custom_operator_handles: List[custom_ops.CustomOperatorHandle] = []
 
         self._build_graph()
         self.placeholder_map: Dict[int, smr.Tensor] = {}
@@ -698,20 +701,9 @@ class DeserializedPipeline:
 
         for op_idx, op in enumerate(self.pipeline_spec.get("operators", [])):
             type_name = op.get("type")
-            attrs: List[str] = [str(a) for a in op.get("attrs", [])]
-            if not attrs:
-                if "flag" in op:
-                    attrs = [str(op.get("flag"))]
-                if "expression" in op:
-                    attrs = [str(op.get("expression"))]
-                if str(type_name).lower() == "nms" and "threshold" in op:
-                    attrs = [str(op.get("threshold"))]
-                if str(type_name).lower() == "sort_mat":
-                    # mode can be COLUMN/ROW etc.; default to COLUMN if provided
-                    mode = op.get("mode") or op.get("axis")
-                    if mode is not None:
-                        attrs = [str(mode)]
-            oid = self.pipeline.allocate_operator(name_to_type(type_name), attrs)
+            op_type = name_to_type(type_name)
+            attrs = self._prepare_operator_attrs(op, op_type)
+            oid = self.pipeline.allocate_operator(op_type, attrs)
             proxy = self.pipeline.query_operator(oid)
             for idx, name in enumerate(op.get("inputs", [])):
                 if not name:
@@ -854,3 +846,61 @@ class DeserializedPipeline:
             tid = self._name_to_id[name]
             outs.append(ph_map[tid])
         return outs[0] if len(outs) == 1 else outs
+
+    def _prepare_operator_attrs(self, op: Dict[str, Any], op_type: smr.EOperatorType) -> List[str]:
+        attrs: List[str] = [str(a) for a in op.get("attrs", [])]
+        if not attrs:
+            if "flag" in op:
+                attrs = [str(op.get("flag"))]
+            if "expression" in op:
+                attrs = [str(op.get("expression"))]
+            if str(op.get("type", "")).lower() == "nms" and "threshold" in op:
+                attrs = [str(op.get("threshold"))]
+            if str(op.get("type", "")).lower() == "sort_mat":
+                mode = op.get("mode") or op.get("axis")
+                if mode is not None:
+                    attrs = [str(mode)]
+
+        if int(op_type) == int(smr.EOperatorType.PYTHON_CUSTOM):
+            attrs = self._resolve_custom_operator_attrs(op, attrs)
+
+        op["attrs"] = attrs
+        return attrs
+
+    def _resolve_custom_operator_attrs(self, op: Dict[str, Any], attrs: List[str]) -> List[str]:
+        for attr in attrs:
+            token = self._extract_custom_token(attr)
+            if token is None:
+                continue
+            implementation = custom_ops.get_registered_custom_operator(token)
+            if implementation is None:
+                raise RuntimeError(
+                    f"Custom operator token '{token}' is not registered. "
+                    "Ensure the custom operator instance remains alive and registered before loading the serialized pipeline."
+                )
+            handle = custom_ops.CustomOperatorHandle(implementation)
+            self._custom_operator_handles.append(handle)
+            new_attrs = [str(x) for x in handle.configs()]
+            return new_attrs
+        return attrs
+
+    @staticmethod
+    def _extract_custom_token(attr: Any) -> Optional[str]:
+        if not isinstance(attr, str):
+            return None
+        prefix = "token:"
+        if attr.lower().startswith(prefix):
+            return attr[len(prefix):]
+        return None
+
+    def close(self) -> None:
+        for handle in self._custom_operator_handles:
+            with contextlib.suppress(Exception):
+                handle.release()
+        self._custom_operator_handles.clear()
+
+    def __del__(self):  # pragma: no cover - best effort cleanup
+        try:
+            self.close()
+        except Exception:
+            pass
