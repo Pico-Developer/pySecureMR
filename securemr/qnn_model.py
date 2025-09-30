@@ -136,9 +136,9 @@ class QnnModel:
             self.output_node_ids = _output_node_ids
             self.output_shapes = _output_shapes
         else:
-            self.output_node_ids = output_node_ids.split(",")
+            self.output_node_ids = output_node_ids.split(",") if "," in output_node_ids else output_node_ids
             self.output_shapes = []
-            for _id in output_node_ids:
+            for _id in self.output_node_ids:
                 assert _id in _output_node_ids
                 self.output_shapes.append(
                     _output_shapes[_output_node_ids.index(_id)]
@@ -455,18 +455,23 @@ class QnnModel:
             Model outputs.
         """
 
-        def _push(src, dst=""):
+        def _push(src, dst="", verbose=False):
             if not os.path.exists(src):
                 raise FileNotFoundError(f"Source file not found: {src}")
             remote_path = f"{self.remote_dir}/{dst}{os.path.basename(src)}"
+            if verbose: print(f">> adb push {src} {remote_path}")
             self.adb.push(src, remote_path)
             # Ensure proper permissions on pushed file
+            if verbose: print(f">> adb shell chmod 644 {remote_path}")
             self.adb.shell(f"chmod 644 {remote_path}")
             # Verify file was pushed successfully
+            if verbose: print(f">> adb shell ls {remote_path} 2>/dev/null")
             if not self.adb.shell(f"ls {remote_path} 2>/dev/null").strip():
                 raise RuntimeError(f"Failed to push file to device: {remote_path}")
-
+            if verbose: print("")
+        
         res = self.adb.shell(f"ls {self.remote_dir}/qnn-net-run; echo $?")
+
         if "No such file or directory" in res:
             if self.binfile:
                 _push(self.binfile)
@@ -529,7 +534,6 @@ class QnnModel:
             --input_list {new_input_list} \
             --output_dir {new_output_dir} 2>&1
         """
-
         # Execute command and capture output
         cmd_output = self.adb.shell(cmd)
 

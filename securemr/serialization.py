@@ -24,6 +24,7 @@ import contextlib
 import json
 import os
 import typing
+import time
 from typing import Dict, List, Any, Optional, Union, Iterable
 
 import numpy as np
@@ -802,7 +803,7 @@ class DeserializedPipeline:
                     if hasattr(lt, 'load_from_raw_byte_arrays'):
                         lt.load_from_raw_byte_arrays(np.ascontiguousarray(np_arr).tobytes())
 
-    def __call__(self, inputs: Union[smr.Tensor, np.ndarray, Dict[Union[str, int], Union[smr.Tensor, np.ndarray]]]):
+    def __call__(self, inputs: Union[smr.Tensor, np.ndarray, Dict[Union[str, int], Union[smr.Tensor, np.ndarray]]], timeout=2):
         ph_map: Dict[int, smr.Tensor] = dict(self.placeholder_map)
 
         def _assign(target_tid: int, value: Union[smr.Tensor, np.ndarray]):
@@ -833,8 +834,7 @@ class DeserializedPipeline:
         pool = smr.ThreadPool2()
         pool.enqueue(task)
 
-        import time
-        for _ in range(200):
+        for _ in range(timeout * 100):
             if not self.pipeline.cannot_modified():
                 break
             time.sleep(0.01)
