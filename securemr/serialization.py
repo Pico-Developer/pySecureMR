@@ -721,18 +721,30 @@ class DeserializedPipeline:
             if str(type_name).lower() == "assignment":
                 src_slices = op.get("src_slices")
                 dst_slices = op.get("dst_slices")
+                def _make_slice_tensor(arr: np.ndarray) -> smr.Tensor:
+                    arr = np.ascontiguousarray(arr.astype(np.int32))
+                    dims = [int(arr.shape[0])]
+                    channels = int(arr.shape[1]) if arr.ndim == 2 else 1
+                    base_vec = getattr(smr.BaseType, "VEC_2", None)
+                    if base_vec is None:
+                        flag = int(smr.EDataType.INT32) | int(smr.BaseType.BIT_VEC) | (int(smr.BaseType.CHANNEL_MASK) & channels)
+                    else:
+                        flag = int(smr.EDataType.INT32) | int(base_vec)
+                        if channels != 2:
+                            flag |= int(smr.BaseType.CHANNEL_MASK) & channels
+                    tensor = smr.TensorFactory.create(dims, flag)
+                    if hasattr(tensor, "load_from_raw_byte_arrays"):
+                        tensor.load_from_raw_byte_arrays(arr.tobytes())
+                    return tensor
+
                 if src_slices is not None:
                     # Build vec2 list with [[row_start,row_end],[col_start,col_end]]
                     arr = np.array(src_slices, dtype=np.int32)
-                    vec = smr.TensorFactory.create([2], int(smr.EDataType.INT32) | smr.BaseType.VEC_2)
-                    if hasattr(vec, 'load_from_raw_byte_arrays'):
-                        vec.load_from_raw_byte_arrays(np.ascontiguousarray(arr).tobytes())
+                    vec = _make_slice_tensor(arr)
                     proxy.data_as_operand(vec, 1)
                 if dst_slices is not None:
                     arr = np.array(dst_slices, dtype=np.int32)
-                    vec = smr.TensorFactory.create([2], int(smr.EDataType.INT32) | smr.BaseType.VEC_2)
-                    if hasattr(vec, 'load_from_raw_byte_arrays'):
-                        vec.load_from_raw_byte_arrays(np.ascontiguousarray(arr).tobytes())
+                    vec = _make_slice_tensor(arr)
                     proxy.data_as_operand(vec, 3)
 
                 # Support dynamic slice tensors referenced by name
@@ -744,6 +756,18 @@ class DeserializedPipeline:
                 if dst_slices_tensor is not None:
                     tid = self._name_to_id[dst_slices_tensor]
                     proxy.data_as_operand(self.pipeline.query_local_tensor(tid), 3)
+
+                src_channel_slice = op.get("src_channel_slice")
+                if src_channel_slice is not None:
+                    arr = np.array([src_channel_slice], dtype=np.int32)
+                    vec = _make_slice_tensor(arr)
+                    proxy.data_as_operand(vec, 2)
+
+                dst_channel_slice = op.get("dst_channel_slice")
+                if dst_channel_slice is not None:
+                    arr = np.array([dst_channel_slice], dtype=np.int32)
+                    vec = _make_slice_tensor(arr)
+                    proxy.data_as_operand(vec, 4)
 
     def _create_backing_tensors(self) -> None:
         tensors = self.pipeline_spec.get("tensors", {})

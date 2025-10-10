@@ -504,14 +504,13 @@ def test_sort_mat_by_column():
 
 def test_normalize_div255():
     image = (np.random.randn(480, 320, 3) * 255).astype(np.uint8)
-    h0, w0 = image.shape[:2]
-    target_h, target_w = h0, w0
+    target_h, target_w = image.shape[:2] 
 
     # Build serializable pipeline
     p = SerializablePipeline()
 
     # Create and query tensors
-    lt_img = p.query_local_tensor(p.allocate_placeholder([h0, w0], mat_flag(smr.EDataType.UINT8, 3), "image"))
+    lt_img = p.query_local_tensor(p.allocate_placeholder([target_w, target_h], mat_flag(smr.EDataType.UINT8, 3), "image"))
     lt_y2 = p.query_local_tensor(p.allocate_local_tensor([target_w, target_h], mat_flag(smr.EDataType.UINT8, 3), "letterboxed_rgb"))
     lt_y3 = p.query_local_tensor(p.allocate_local_tensor([target_w, target_h], mat_flag(smr.EDataType.FLOAT32, 3), "letterboxed_float32"))
     lt_y4 = p.query_local_tensor(p.allocate_local_tensor([target_w, target_h], mat_flag(smr.EDataType.FLOAT32, 3), "normalized_tensor"))
