@@ -37,6 +37,7 @@ __all__ = ["Pipeline",
            "DeserializedPipeline",
            "add_vst_operator",
            "add_model_inference_operator",
+           "convert_python_custom_to_run_algorithm",
            ]
 
 SPEC_VERSION = "1.0.0"
@@ -242,8 +243,6 @@ def type_to_name(op_type: smr.EOperatorType) -> str:
 def _ensure_list_size(lst: List[typing.Optional[int]], size: int) -> None:
     if len(lst) < size:
         lst.extend([None] * (size - len(lst)))
-
-# (Legacy helpers removed; functionality moved into Pipeline/DeserializedPipeline)
 
 
 class Pipeline(smr.Pipeline):
@@ -657,6 +656,79 @@ def add_model_inference_operator(
             tensors[name]["is_placeholder"] = False
         if "inputs" in spec and name in spec["outputs"]:
             spec["outputs"].remove(name)
+
+
+def convert_python_custom_to_run_algorithm(
+    pipeline: Union["Pipeline", Dict[str, Any]],
+    *,
+    model_path: Optional[str] = None,
+) -> bool:
+    """Rewrite python_custom operators to run_algorithm entries in the pipeline spec.
+
+    Args:
+        pipeline: Serializable pipeline instance or raw spec dictionary to mutate.
+        model_path: Optional model path used to fill asset/file metadata.
+
+    Returns:
+        True if at least one operator was rewritten, otherwise False.
+    """
+    if pipeline is None:
+        return False
+
+    if hasattr(pipeline, "spec"):
+        spec = pipeline.spec
+    elif isinstance(pipeline, dict):
+        spec = pipeline
+    else:
+        raise TypeError("pipeline must be a SerializablePipeline or spec dictionary.")
+
+    if spec is None:
+        return False
+
+    ops = spec.get("operators") or []
+    if not isinstance(ops, list) or not ops:
+        return False
+
+    context_file = os.path.basename(model_path) if model_path else ""
+    model_name = os.path.splitext(context_file)[0] if context_file else ""
+
+    def _resolve_names(entries: Optional[List[Any]]) -> List[str]:
+        names: List[str] = []
+        for entry in entries or []:
+            if isinstance(entry, dict):
+                tensor_name = entry.get("tensor") or entry.get("name")
+            else:
+                tensor_name = entry
+            if tensor_name:
+                names.append(str(tensor_name))
+        return names
+
+    replaced = False
+    for op in ops:
+        op_type = str(op.get("type", "")).lower()
+        if op_type not in {"python_custom", "custom"}:
+            continue
+
+        inputs = _resolve_names(op.get("inputs"))
+        outputs = _resolve_names(op.get("outputs"))
+
+        op["type"] = "run_algorithm"
+        op["inputs"] = inputs
+        op["outputs"] = outputs
+        op.pop("attrs", None)
+        op["model_name"] = model_name or "model"
+
+        if context_file and context_file.lower().endswith(".bin"):
+            op["model_asset"] = context_file
+            op.pop("model_file", None)
+        elif model_path:
+            model_file = model_path if os.path.isabs(model_path) else os.path.abspath(model_path)
+            op["model_file"] = model_file
+            op.pop("model_asset", None)
+
+        replaced = True
+
+    return replaced
 
 
 class DeserializedPipeline:
