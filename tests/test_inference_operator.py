@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+import os
 import securemr as smr
 from pathlib import Path
 
@@ -23,6 +24,8 @@ def mnist_qnn_model_path() -> str:
 
 
 def test_model_inference_operator_qnn_backend(monkeypatch, mnist_qnn_model_path):
+    if os.getenv("QNN_SDK_ROOT", None) is None:
+        pytest.skip(f"QNN_SDK_ROOT is not found, skip")
     operator = inference_module.ModelInferenceOperator(mnist_qnn_model_path, device="host")
 
     input_np = np.full((28, 28, 1), 0.5, dtype=np.float32)

@@ -689,8 +689,9 @@ def convert_python_custom_to_run_algorithm(
     if not isinstance(ops, list) or not ops:
         return False
 
-    context_file = os.path.basename(model_path) if model_path else ""
-    model_name = os.path.splitext(context_file)[0] if context_file else ""
+    assert model_path, f"model_path is required."
+    context_file = os.path.basename(model_path)
+    model_name = context_file.split(".")[0]
 
     def _resolve_names(entries: Optional[List[Any]]) -> List[str]:
         names: List[str] = []
