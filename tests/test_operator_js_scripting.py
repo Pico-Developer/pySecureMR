@@ -18,21 +18,6 @@ import pytest
 import securemr as smr
 
 
-def _js_operator_type() -> smr.EOperatorType:
-    """Return the JS scripting operator enum value, falling back to the raw id if unnamed."""
-    if hasattr(smr.EOperatorType, "JS_SCRIPTING"):
-        return getattr(smr.EOperatorType, "JS_SCRIPTING")
-    return smr.EOperatorType(39)
-
-
-def _create_operator(js_code: str):
-    js_op_type = _js_operator_type()
-    try:
-        return smr.OperatorFactory.create(js_op_type, [js_code])
-    except RuntimeError as exc:  # pragma: no cover - defensive to avoid hard failure
-        pytest.skip(f"JS scripting operator unavailable: {exc}")
-
-
 def _squeeze(tensor: smr.TensorMat) -> np.ndarray:
     return np.squeeze(tensor.numpy()).astype(np.float32)
 
@@ -45,9 +30,9 @@ def test_js_scripting_basic_functionality():
             out_result[i] = in_sourceData[i] * 2;
         }
     '''
-    op = _create_operator(js_code)
+    op = smr.OperatorFactory.create(smr.EOperatorType.JS_SCRIPTING, [js_code])
 
-    assert op.get_operator_type().value == _js_operator_type().value
+    assert op.get_operator_type().value == smr.EOperatorType.JS_SCRIPTING.value
     assert op.get_operand_cnt() == 1
     assert op.get_results_cnt() == 1
 
@@ -80,7 +65,7 @@ def test_js_scripting_multiple_inputs_outputs():
             out_product[i] = in_a[i] * in_b[i];
         }
     '''
-    op = _create_operator(js_code)
+    op = smr.OperatorFactory.create(smr.EOperatorType.JS_SCRIPTING, [js_code])
 
     assert op.get_operand_cnt() == 2
     assert op.get_results_cnt() == 2
@@ -134,7 +119,7 @@ def test_js_scripting_generate_tensor_without_operands():
         "   out_frame[i] = Math.sin(i);"
         " }"
     )
-    op = _create_operator(js_code)
+    op = smr.OperatorFactory.create(smr.EOperatorType.JS_SCRIPTING, [js_code])
 
     assert op.get_operand_cnt() == 0
     result_index = op.get_result_idx_from_name("out_frame")

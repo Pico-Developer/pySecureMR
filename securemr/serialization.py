@@ -25,6 +25,7 @@ import json
 import os
 import typing
 import time
+import uuid
 from typing import Dict, List, Any, Optional, Union, Iterable
 
 import numpy as np
@@ -38,6 +39,7 @@ __all__ = ["Pipeline",
            "add_vst_operator",
            "add_model_inference_operator",
            "convert_python_custom_to_run_algorithm",
+           "convert_run_algorithm_to_python_custom",
            ]
 
 SPEC_VERSION = "1.0.0"
@@ -139,49 +141,11 @@ def name_to_type(name: str) -> smr.EOperatorType:
 
     # Provide aliases for common short names used in Pipeline serialization
     alias: Dict[str, str] = {
-        "get_affine": "GET_AFFINE",
-        "apply_affine": "APPLY_AFFINE",
-        "assignment": "ASSIGNMENT",
         "cvt_color": "CONVERT_COLOR",
-        "convert_color": "CONVERT_COLOR",
-        "arithmetic": "ARITHMETIC_COMPOSE",
-        "arithmetic_compose": "ARITHMETIC_COMPOSE",
-        "type_convert": "TYPE_CONVERT",
         "camera_access": "RECTIFIED_VST_ACCESS",
-        "rectified_vst_access": "RECTIFIED_VST_ACCESS",
+        "run_algorithm": "RUN_MODEL_INFERENCE",
+        "arithmetic": "ARITHMETIC_COMPOSE",
     }
-
-    # 'ALL',
-    # 'ANY',
-    # 'APPLY_AFFINE',
-    # 'APPLY_AFFINE_POINT',
-    # 'ARGMAX',
-    # 'ARITHMETIC_COMPOSE',
-    # 'ASSIGNMENT',
-    # 'CAMERA_SPACE_TO_WORLD',
-    # 'CONVERT_COLOR',
-    # 'CUSTOMIZED_COMPARE',
-    # 'ELEMENTWISE_AND',
-    # 'ELEMENTWISE_MAX',
-    # 'ELEMENTWISE_MIN',
-    # 'ELEMENTWISE_MULTIPLY',
-    # 'ELEMENTWISE_OR',
-    # 'GET_AFFINE',
-    # 'INVERSION',
-    # 'MAKE_TRANSFORM_MAT',
-    # 'NMS',
-    # 'NORMALIZE',
-    # 'RECTIFIED_VST_ACCESS',
-    # 'RENDER_TEXT',
-    # 'RUN_MODEL_INFERENCE',
-    # 'SOLVE_P_N_P',
-    # 'SORT_MAT',
-    # 'SORT_VEC',
-    # 'SWITCH_GLTF_RENDER_STATUS',
-    # 'UNKNOWN',
-    # 'UPDATE_GLTF',
-    # 'UPLOAD_TEXTURE_TO_GLTF',
-    # 'UV_TO_3D_IN_CAM_SPACE'
 
     key = alias.get(s.lower())
     if key and key in members:
@@ -732,6 +696,143 @@ def convert_python_custom_to_run_algorithm(
     return replaced
 
 
+def convert_run_algorithm_to_python_custom(
+    pipeline: Union["Pipeline", Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Convert run_algorithm operators to python_custom equivalents.
+
+    This is primarily used when loading a serialized pipeline on the host, where
+    the native run_algorithm operator is unavailable. Each run_algorithm entry is
+    replaced by a python_custom operator backed by ModelInferenceOperator.
+    """
+    if pipeline is None:
+        return pipeline
+
+    if hasattr(pipeline, "spec"):
+        spec = pipeline.spec
+    elif isinstance(pipeline, dict):
+        spec = pipeline
+    else:
+        raise TypeError("pipeline must be a Pipeline instance or a spec dictionary.")
+
+    if spec is None:
+        return spec
+
+    operators = spec.get("operators")
+    if not isinstance(operators, list) or not operators:
+        return spec
+
+    metadata = spec.get("metadata", {}) or {}
+
+    # Late import to avoid circular dependency at module import time.
+    from securemr.operators.inference_operator import ModelInferenceOperator
+
+    def _extract_tensor_info(entries: Optional[List[Any]]) -> tuple[List[str], List[str]]:
+        tensor_names: List[str] = []
+        logical_names: List[str] = []
+        for entry in entries or []:
+            tensor_name: Optional[str]
+            logical_name: Optional[str]
+            if isinstance(entry, dict):
+                tensor_name = entry.get("tensor") or entry.get("name")
+                logical_name = entry.get("name") or tensor_name
+            else:
+                tensor_name = entry
+                logical_name = entry
+            if tensor_name:
+                tensor_names.append(str(tensor_name))
+                logical_names.append(str(logical_name) if logical_name else str(tensor_name))
+        return tensor_names, logical_names
+
+    def _candidate_directories(op_dict: Dict[str, Any]) -> List[str]:
+        dirs: List[str] = []
+        op_dir = op_dict.get("model_dir")
+        if op_dir:
+            dirs.append(str(op_dir))
+        for key in ("model_dir", "base_dir", "assets_dir"):
+            val = metadata.get(key)
+            if val:
+                dirs.append(str(val))
+        env_dir = os.getenv("PYSECUREMR_ASSET_DIR")
+        if env_dir:
+            dirs.append(env_dir)
+        return dirs
+
+    def _resolve_model_path(op_dict: Dict[str, Any]) -> str:
+        candidates: List[str] = []
+        for key in ("model_file", "model_path"):
+            path = op_dict.get(key)
+            if path:
+                candidates.append(str(path))
+        for key in ("model", "model_asset"):
+            path = op_dict.get(key)
+            if path:
+                candidates.append(str(path))
+
+        search_dirs = _candidate_directories(op_dict)
+
+        for path in candidates:
+            if os.path.isabs(path):
+                return path
+            for root in search_dirs:
+                full = os.path.abspath(os.path.join(root, path))
+                if os.path.exists(full):
+                    return full
+
+        if candidates:
+            # Fall back to the first candidate (absolute or relative).
+            path = candidates[0]
+            if not os.path.isabs(path) and search_dirs:
+                return os.path.abspath(os.path.join(search_dirs[0], path))
+            return os.path.abspath(path)
+
+        raise ValueError("Unable to resolve model path for run_algorithm operator.")
+
+    for op in operators:
+        op_type = str(op.get("type", "")).lower()
+        if op_type != "run_algorithm":
+            continue
+
+        input_tensors, operand_names = _extract_tensor_info(op.get("inputs"))
+        output_tensors, result_names = _extract_tensor_info(op.get("outputs"))
+
+        if not input_tensors:
+            raise ValueError("run_algorithm operator must provide at least one input tensor.")
+        if not operand_names:
+            operand_names = input_tensors
+        if not result_names:
+            result_names = output_tensors if output_tensors else ["output"]
+
+        model_path = _resolve_model_path(op)
+        convert_output_dir = op.get("convert_output_dir")
+        output_node_ids = op.get("output_node_ids")
+
+        custom_impl = ModelInferenceOperator(
+            model_path=model_path,
+            device="auto",
+            convert_output_dir=convert_output_dir,
+            onnx_to_qnn=False,
+            operand_names=operand_names,
+            result_names=result_names,
+            output_node_ids=output_node_ids,
+        )
+        registry = getattr(custom_ops, "_TOKEN_TO_IMPLEMENTATION", None)
+        if registry is None:
+            raise RuntimeError("Custom operator registry is unavailable.")
+        token = f"run-algorithm-{uuid.uuid4().hex}"
+        while token in registry:
+            token = f"run-algorithm-{uuid.uuid4().hex}"
+        registry[token] = custom_impl
+
+        op.clear()
+        op["type"] = "python_custom"
+        op["attrs"] = [f"token:{token}"]
+        op["inputs"] = input_tensors
+        op["outputs"] = output_tensors
+
+    return spec
+
+
 class DeserializedPipeline:
     """Load a Pipeline.save JSON and run it (mnist-style keys).
 
@@ -772,6 +873,10 @@ class DeserializedPipeline:
             else:
                 new_id = int(self.pipeline.allocate_local_tensor(dims, flag))
             self._name_to_id[name] = new_id
+        
+        # run_algorithm operator not supported on host/python, replace it with python_custom
+        # reverse of convert_python_custom_to_run_algorithm
+        self.pipeline_spec = convert_run_algorithm_to_python_custom(self.pipeline_spec)
 
         for op_idx, op in enumerate(self.pipeline_spec.get("operators", [])):
             type_name = op.get("type")
@@ -791,6 +896,7 @@ class DeserializedPipeline:
                 proxy.connect_result_to_data_array(idx, self.pipeline.query_local_tensor(tid))
 
             # Special handling: ASSIGNMENT slices wiring
+            # TODO: remove special handling
             if str(type_name).lower() == "assignment":
                 src_slices = op.get("src_slices")
                 dst_slices = op.get("dst_slices")
@@ -900,7 +1006,11 @@ class DeserializedPipeline:
                     if hasattr(lt, 'load_from_raw_byte_arrays'):
                         lt.load_from_raw_byte_arrays(np.ascontiguousarray(np_arr).tobytes())
 
-    def __call__(self, inputs: Union[smr.Tensor, np.ndarray, Dict[Union[str, int], Union[smr.Tensor, np.ndarray]]], timeout=2):
+    def __call__(
+        self,
+        inputs: Optional[Union[smr.Tensor, np.ndarray, Dict[Union[str, int], Union[smr.Tensor, np.ndarray]]]] = None,
+        timeout=2,
+    ):
         ph_map: Dict[int, smr.Tensor] = dict(self.placeholder_map)
 
         def _assign(target_tid: int, value: Union[smr.Tensor, np.ndarray]):
@@ -912,7 +1022,10 @@ class DeserializedPipeline:
             else:
                 raise TypeError("Unsupported input type; must be smr.Tensor or numpy.ndarray")
 
-        if isinstance(inputs, dict):
+        if inputs is None:
+            if self._inputs_names:
+                raise ValueError("Pipeline expects input tensors; provide data via 'inputs'.")
+        elif isinstance(inputs, dict):
             for k, v in inputs.items():
                 if isinstance(k, str):
                     tid = self._name_to_id[k]
@@ -975,6 +1088,9 @@ class DeserializedPipeline:
                     f"Custom operator token '{token}' is not registered. "
                     "Ensure the custom operator instance remains alive and registered before loading the serialized pipeline."
                 )
+            registry = getattr(custom_ops, "_TOKEN_TO_IMPLEMENTATION", None)
+            if isinstance(registry, dict) and token in registry:
+                registry.pop(token, None)
             handle = custom_ops.CustomOperatorHandle(implementation)
             self._custom_operator_handles.append(handle)
             new_attrs = [str(x) for x in handle.configs()]
