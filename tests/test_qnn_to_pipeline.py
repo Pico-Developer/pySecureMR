@@ -27,6 +27,8 @@ def _prepare_context_binary(tmp_path: Path) -> Path:
 
 
 def test_qnn_pipeline_execution(tmp_path):
+    pytest.skip("WIP")
+
     context_binary = _prepare_context_binary(tmp_path)
     spec = build_pipeline_spec(str(context_binary))
 

@@ -33,6 +33,14 @@ import securemr as smr
 import re
 from securemr.operators import custom_operator as custom_ops
 
+from .utils import (
+    convert_from_dtype,
+    convert_to_dtype,
+    mat_flag,
+    normalize_qnn_dtype,
+    numpy_dtype_to_smr,
+    unmat_flag,
+)
 
 __all__ = ["Pipeline",
            "DeserializedPipeline",
@@ -44,54 +52,177 @@ __all__ = ["Pipeline",
 
 SPEC_VERSION = "1.0.0"
 
-NUMPY_DTYPE = [None, np.uint8, np.int8, np.uint16, np.int16, np.int32, np.float32, np.float64]
+def _extract_qnn_io_from_metadata(data: Any) -> Optional[Dict[str, List[Dict[str, Any]]]]:
+    if not isinstance(data, dict):
+        return None
 
-SMR_DTYPE = [None, smr.EDataType.UINT8, smr.EDataType.INT8, smr.EDataType.UINT16,
-             smr.EDataType.INT16, smr.EDataType.INT32,smr.EDataType.FLOAT32,
-             smr.EDataType.FLOAT64]
+    def _collect(entries: Optional[List[Any]]) -> List[Dict[str, Any]]:
+        collected: List[Dict[str, Any]] = []
+        for entry in entries or []:
+            info = entry.get("info") if isinstance(entry, dict) and "info" in entry else entry
+            if not isinstance(info, dict):
+                continue
+            dtype_value = info.get("encoding_type") or info.get("dataType") or info.get("dtype")
+            collected.append(
+                {
+                    "name": info.get("name"),
+                    "dimensions": info.get("dimensions") or info.get("shape"),
+                    "numpy_dtype": normalize_qnn_dtype(dtype_value),
+                    "raw_dtype": dtype_value,
+                }
+            )
+        return collected
 
-def convert_to_dtype(data_type, target="numpy") -> "type":
-    """
-    Convert XrSecureMrTensorDataTypePICO to numpy / smr data type.
-    """
-    if target == "numpy":
-        return NUMPY_DTYPE[data_type]
-    elif target == "smr":
-        return SMR_DTYPE[data_type]
-    else:
-        raise NotImplementedError
+    info = data.get("info")
+    if isinstance(info, dict):
+        graphs = info.get("graphs")
+        if isinstance(graphs, list) and graphs:
+            graph_info = graphs[0]
+            graph = graph_info.get("info") if isinstance(graph_info, dict) and "info" in graph_info else graph_info
+            if isinstance(graph, dict):
+                inputs = _collect(graph.get("graphInputs"))
+                outputs = _collect(graph.get("graphOutputs"))
+                if inputs or outputs:
+                    return {"inputs": inputs, "outputs": outputs}
+
+    if "input" in data or "output" in data:
+        inputs = _collect(data.get("input"))
+        outputs = _collect(data.get("output"))
+        if inputs or outputs:
+            return {"inputs": inputs, "outputs": outputs}
+
+    return None
 
 
-def convert_from_dtype(data_type, source="numpy") -> "type":
-    """
-    Convert numpy / smr data type to XrSecureMrTensorDataTypePICO.
-    """
-    if source =="numpy":
-        return NUMPY_DTYPE.index(data_type)
-    elif source == "smr":
-        return SMR_DTYPE.index(data_type)
-    else:
-        raise NotImplementedError
+def _load_qnn_metadata(model_path: str) -> Optional[Dict[str, List[Dict[str, Any]]]]:
+    if not model_path:
+        return None
+    abs_path = os.path.abspath(model_path)
+    parent = os.path.dirname(abs_path)
+    base = os.path.basename(abs_path)
+    stem, ext = os.path.splitext(base)
+
+    candidates = {
+        abs_path + ".json",
+        os.path.join(parent, base + ".json"),
+        os.path.join(parent, base + ".bin.json"),
+        os.path.join(parent, stem + ".json"),
+        os.path.join(parent, stem + ".bin.json"),
+        os.path.join(parent, f"{base}.json"),
+        os.path.join(parent, "model.serialized.bin.json"),
+        os.path.join(parent, "model_info.json"),
+    }
+
+    for path in candidates:
+        if not path or not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        io_info = _extract_qnn_io_from_metadata(data)
+        if io_info:
+            return io_info
+    return None
 
 
-def mat_flag(dtype: smr.EDataType, channels: int) -> int:
-    return int(dtype) | smr.BaseType.MAT | (smr.BaseType.CHANNEL_MASK & channels)
+def qnn_dimensions_to_smr(qnn_dimensions):
+    """Convert qnn_dimensions (BHWC) to (W,H) and C."""
+    if len(qnn_dimensions) == 4:
+        B, H, W, C = qnn_dimensions
+        assert B == 1
+        return [W, H], C
+    elif len(qnn_dimensions) == 3:
+        B, HW, C = qnn_dimensions
+        return [HW, C], 1
+    elif len(qnn_dimensions) == 2:
+        B, HW = qnn_dimensions
+        return [HW, 1], 1
+    elif len(qnn_dimensions) == 2:
+        return [1, 1], 1
 
 
-def unmat_flag(flag: int) -> tuple[smr.EDataType, int]:
-    # Optional: ensure this is a MAT-typed flag
-    if not (int(flag) & int(smr.BaseType.MAT)):
-        raise ValueError("flag does n encode a MAT type")
+def _ensure_tensor_from_q_info(spec: Dict[str, Any], tensor_name: str, q_info: Optional[Any]) -> None:
+    numpy_dtype = q_info.get("numpy_dtype")
+    if spec is None or numpy_dtype is None:
+        return
+    tensors = spec.get("tensors")
+    if not isinstance(tensors, dict):
+        return
 
-    # Extract channels
-    channels = int(flag) & int(smr.BaseType.CHANNEL_MASK)
+    if "tensor_name" not in tensors:
+        print(f"{tensor_name} not found in spec, create one")
+        dimensions, channels = qnn_dimensions_to_smr(q_info.get("dimensions"))
+        tensors[tensor_name] = {
+                "dimensions": dimensions,
+                "channels": channels,
+                "is_placeholder": False}
+    tensor_desc = tensors.get(tensor_name)
+    if "usage" not in tensor_desc:
+        tensor_desc["usage"] = 6
+    if "value" not in tensor_desc:
+        tensor_desc["value"] = None
 
-    # Recover dtype: clear MAT and channel bits, then cast to EDataType
-    clear_mask = int(smr.BaseType.MAT) | int(smr.BaseType.CHANNEL_MASK)
-    dtype_bits = int(flag) & ~clear_mask
-    dtype = smr.EDataType(dtype_bits)
-    
-    return dtype, channels
+    try:
+        canonical = np.dtype(numpy_dtype).type
+    except TypeError:
+        return
+
+    if canonical is np.float16:
+        canonical = np.float32 
+    dtype_idx = convert_from_dtype(canonical)
+
+    tensor_desc["data_type"] = dtype_idx
+    channels = tensor_desc.get("channels")
+    dtype_enum = numpy_dtype_to_smr(canonical)
+    if channels is not None and dtype_enum is not None:
+        tensor_desc["flag"] = mat_flag(dtype_enum, int(channels))
+
+
+def _extract_custom_token_from_attrs(attrs: Optional[List[Any]]) -> Optional[str]:
+    for attr in attrs or []:
+        if isinstance(attr, str) and attr.startswith("token:"):
+            return attr.split(":", 1)[1]
+    return None
+
+
+def _select_qnn_outputs(
+    all_outputs: Optional[List[Dict[str, Any]]],
+    active_names: Optional[List[str]],
+) -> Optional[List[Dict[str, Any]]]:
+    if all_outputs is None:
+        return None
+    if not active_names:
+        return list(all_outputs)
+    mapping = {
+        str(entry.get("name")): entry
+        for entry in all_outputs
+        if isinstance(entry, dict) and entry.get("name") is not None
+    }
+    ordered: List[Dict[str, Any]] = []
+    for name in active_names:
+        info = mapping.get(str(name))
+        if info is not None:
+            ordered.append(info)
+    if ordered:
+        return ordered
+    return list(all_outputs)
+
+
+def _build_io_entries(
+    tensor_names: List[str],
+    qnn_infos: Optional[List[Dict[str, Any]]],
+    spec: Dict[str, Any],
+) -> List[Dict[str, str]]:
+    entries: List[Dict[str, str]] = []
+    for idx, tensor_name in enumerate(tensor_names):
+        q_info = qnn_infos[idx] if qnn_infos and idx < len(qnn_infos) else None
+        q_name = q_info.get("name") if q_info and q_info.get("name") else tensor_name
+        entries.append({"name": str(q_name), "tensor": str(tensor_name)})
+        if q_info:
+            _ensure_tensor_from_q_info(spec, tensor_name, q_info)
+    return entries
 
 def as_list(data):
     if isinstance(data, (list, tuple)):
@@ -626,6 +757,7 @@ def convert_python_custom_to_run_algorithm(
     pipeline: Union["Pipeline", Dict[str, Any]],
     *,
     model_path: Optional[str] = None,
+    extras: Optional[Dict] = None,
 ) -> bool:
     """Rewrite python_custom operators to run_algorithm entries in the pipeline spec.
 
@@ -653,9 +785,17 @@ def convert_python_custom_to_run_algorithm(
     if not isinstance(ops, list) or not ops:
         return False
 
-    assert model_path, f"model_path is required."
-    context_file = os.path.basename(model_path)
-    model_name = context_file.split(".")[0]
+    if not model_path:
+        raise ValueError("model_path is required.")
+    abs_model_path = model_path if os.path.isabs(model_path) else os.path.abspath(model_path)
+    context_file = os.path.basename(abs_model_path)
+    model_name = context_file.split(".")[0] or "model"
+    is_qnn_model = context_file.lower().endswith(".bin")
+    qnn_metadata = _load_qnn_metadata(abs_model_path) if is_qnn_model else None
+    if is_qnn_model and qnn_metadata is None:
+        raise FileNotFoundError(f"Unable to locate QNN metadata for model: {abs_model_path}")
+    qnn_inputs_all = qnn_metadata.get("inputs") if qnn_metadata else None
+    qnn_outputs_all = qnn_metadata.get("outputs") if qnn_metadata else None
 
     def _resolve_names(entries: Optional[List[Any]]) -> List[str]:
         names: List[str] = []
@@ -674,21 +814,46 @@ def convert_python_custom_to_run_algorithm(
         if op_type not in {"python_custom", "custom"}:
             continue
 
-        inputs = _resolve_names(op.get("inputs"))
-        outputs = _resolve_names(op.get("outputs"))
+        input_tensors = _resolve_names(op.get("inputs"))
+        output_tensors = _resolve_names(op.get("outputs"))
+
+        token = _extract_custom_token_from_attrs(op.get("attrs"))
+        impl = custom_ops.get_registered_custom_operator(token) if token else None
+
+        active_outputs: Optional[List[str]] = None
+        if impl is not None and hasattr(impl, "_model"):
+            output_ids = getattr(impl._model, "output_node_ids", None)
+            if isinstance(output_ids, str):
+                active_outputs = [output_ids]
+            elif isinstance(output_ids, (list, tuple)):
+                active_outputs = [str(x) for x in output_ids]
+
+        qnn_inputs = qnn_inputs_all
+        qnn_outputs = _select_qnn_outputs(qnn_outputs_all, active_outputs)
+
+        if qnn_inputs is not None and len(qnn_inputs) != len(input_tensors):
+            raise ValueError(
+                f"QNN model input count ({len(qnn_inputs)}) does not match pipeline tensors ({len(input_tensors)})."
+            )
+        if qnn_outputs is not None and len(qnn_outputs) != len(output_tensors):
+            if "output_tensors" in extras:
+                output_tensors = extras["output_tensors"]
+            else:
+                raise ValueError(
+                    f"QNN model output count ({len(qnn_outputs)}) does not match pipeline tensors ({len(output_tensors)})."
+                )
 
         op["type"] = "run_algorithm"
-        op["inputs"] = inputs
-        op["outputs"] = outputs
+        op["inputs"] = _build_io_entries(input_tensors, qnn_inputs, spec)
+        op["outputs"] = _build_io_entries(output_tensors, qnn_outputs, spec)
         op.pop("attrs", None)
-        op["model_name"] = model_name or "model"
+        op["model_name"] = model_name
 
-        if context_file and context_file.lower().endswith(".bin"):
+        if is_qnn_model:
             op["model_asset"] = context_file
             op.pop("model_file", None)
-        elif model_path:
-            model_file = model_path if os.path.isabs(model_path) else os.path.abspath(model_path)
-            op["model_file"] = model_file
+        else:
+            op["model_file"] = abs_model_path
             op.pop("model_asset", None)
 
         replaced = True

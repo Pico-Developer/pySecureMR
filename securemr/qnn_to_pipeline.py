@@ -23,7 +23,7 @@ from typing import Dict, List, Sequence
 
 import securemr as smr
 
-from .serialization import convert_from_dtype
+from .utils import convert_from_dtype, ensure_tensor_dimensions, mat_flag, qnn_dtype_to_smr
 
 
 @dataclass
@@ -126,26 +126,12 @@ def _infer_spatial_dims(dimensions: Sequence[int]) -> tuple[List[int], int]:
     return [max(int(dims[1]), 1)], 1
 
 
-def _qnn_dtype_to_smr(dtype_str: str) -> smr.EDataType:
-    mapping = {
-        "QNN_DATATYPE_FLOAT_32": smr.EDataType.FLOAT32,
-        "QNN_DATATYPE_FLOAT_16": smr.EDataType.FLOAT32,
-        "QNN_DATATYPE_FLOAT_64": smr.EDataType.FLOAT64,
-        "QNN_DATATYPE_UINT_8": smr.EDataType.UINT8,
-        "QNN_DATATYPE_UINT_16": smr.EDataType.UINT16,
-        "QNN_DATATYPE_INT_8": smr.EDataType.INT8,
-        "QNN_DATATYPE_INT_16": smr.EDataType.INT16,
-        "QNN_DATATYPE_INT_32": smr.EDataType.INT32,
-    }
-    return mapping.get(dtype_str, smr.EDataType.FLOAT32)
-
-
 def _tensor_info_from_entry(entry: Dict, suffix: str = "") -> TensorInfo:
     info = entry.get("info", {})
     qnn_name = str(info.get("name", "tensor"))
     tensor_name = _sanitize_tensor_name(qnn_name, suffix)
     spatial, channels = _infer_spatial_dims(info.get("dimensions", []))
-    dtype = _qnn_dtype_to_smr(info.get("dataType", ""))
+    dtype = qnn_dtype_to_smr(info.get("dataType", ""))
     total_size = channels
     for d in spatial:
         total_size *= max(int(d), 1)
@@ -175,16 +161,8 @@ def _build_js_script(inputs: Sequence[TensorInfo]) -> str:
 
 
 def _make_tensor_entry(info: TensorInfo, *, is_placeholder: bool) -> Dict:
-    flag = (
-        int(info.dtype)
-        | int(smr.BaseType.MAT)
-        | (int(smr.BaseType.CHANNEL_MASK) & int(info.channels))
-    )
-    dims = list(info.spatial_dims)
-    if not dims:
-        dims = [1, 1]
-    elif len(dims) == 1:
-        dims = [dims[0], 1]
+    flag = mat_flag(info.dtype, info.channels)
+    dims = ensure_tensor_dimensions(info.spatial_dims)
     return {
         "dimensions": dims,
         "channels": info.channels,
@@ -195,11 +173,7 @@ def _make_tensor_entry(info: TensorInfo, *, is_placeholder: bool) -> Dict:
     }
 
 def _make_dummy_tensor(is_placeholder: bool) -> Dict:
-    flag = (
-        int(smr.EDataType.FLOAT32)
-        | int(smr.BaseType.MAT)
-        | (int(smr.BaseType.CHANNEL_MASK) & 1)
-    )
+    flag = mat_flag(smr.EDataType.FLOAT32, 1)
     return {
         "dimensions": [1, 1],
         "channels": 1,
