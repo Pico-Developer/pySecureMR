@@ -188,6 +188,8 @@ class ModelInferenceOperator(PyOperatorBase, CustomOperatorBase):
             try:
                 outputs = self._model(x_qnn, is_nhwc=False)
             except Exception as e:
+                if "Device Creation failure" in str(e):
+                    print("Forget to `adb root` for PICO device?")
                 raise RuntimeError(f"QNN inference failed: {e}")
 
             # import cv2; cv2.imwrite("aa.png", (x_qnn[0].transpose((1,2,0)) * 255).astype(np.uint8))
