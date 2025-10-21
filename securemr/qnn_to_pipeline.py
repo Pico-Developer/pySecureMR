@@ -23,6 +23,7 @@ from typing import Dict, List, Sequence
 
 import securemr as smr
 
+from .serialization import type_to_name
 from .utils import convert_from_dtype, ensure_tensor_dimensions, mat_flag, qnn_dtype_to_smr
 
 
@@ -221,14 +222,14 @@ def build_pipeline_spec(
     js_script = _build_js_script(input_infos)
 
     js_operator = {
-        "type": "js_scripting",
+        "type": type_to_name(smr.EOperatorType.JS_SCRIPTING),
         "attrs": [js_script],
         "inputs": ["dummy_input"],
         "outputs": [info.tensor_name for info in input_infos],
     }
 
     model_operator = {
-        "type": "run_algorithm",
+        "type": type_to_name(smr.EOperatorType.RUN_MODEL_INFERENCE),
         "inputs": [
             {"name": info.qnn_name, "tensor": info.tensor_name} for info in input_infos
         ],

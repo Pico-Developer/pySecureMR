@@ -42,15 +42,18 @@ from .utils import (
     unmat_flag,
 )
 
-__all__ = ["Pipeline",
-           "DeserializedPipeline",
-           "add_vst_operator",
-           "add_model_inference_operator",
-           "convert_python_custom_to_run_algorithm",
-           "convert_run_algorithm_to_python_custom",
-           ]
+__all__ = [
+    "Pipeline",
+    "DeserializedPipeline",
+    "add_vst_operator",
+    "add_model_inference_operator",
+    "convert_python_custom_to_run_algorithm",
+    "convert_run_algorithm_to_python_custom",
+]
 
 SPEC_VERSION = "1.0.0"
+_OP_ENUM_PREFIX = "XR_SECURE_MR_OPERATOR_TYPE_"
+_OP_ENUM_SUFFIX = "_PICO"
 
 def _extract_qnn_io_from_metadata(data: Any) -> Optional[Dict[str, List[Dict[str, Any]]]]:
     if not isinstance(data, dict):
@@ -233,89 +236,96 @@ def as_list(data):
         return data
 
 
-def name_to_type(name: str) -> smr.EOperatorType:
-    # Build a map of enum members dynamically so we cover all types
+def _operator_members() -> Dict[str, Any]:
     members: Dict[str, Any] = {}
     for attr in dir(smr.EOperatorType):
         if attr.startswith("__"):
             continue
         try:
             val = getattr(smr.EOperatorType, attr)
-            # Ensure this attr is an enum value (int-like)
             _ = int(val)
-            members[attr.upper()] = val
         except Exception:
             continue
+        members[attr.upper()] = val
+        members["XR_SECURE_MR_OPERATOR_TYPE_" + attr.upper() + "_PICO"] = val
+    return members
 
-    # Accept ints or numeric strings directly
+
+def _normalize_operator_token(token: str) -> str:
+    norm = re.sub(r"[^0-9A-Za-z]+", "_", token).upper()
+    if norm.startswith(_OP_ENUM_PREFIX):
+        norm = norm[len(_OP_ENUM_PREFIX) :]
+    if norm.endswith(_OP_ENUM_SUFFIX):
+        norm = norm[: -len(_OP_ENUM_SUFFIX)]
+    return norm
+
+
+def name_to_type(name: Union[str, int, smr.EOperatorType]) -> smr.EOperatorType:
+    members = _operator_members()
+
+    if isinstance(name, smr.EOperatorType):
+        return name
+
     if isinstance(name, int):
         val = int(name)
-        for k, v in members.items():
+        for candidate in members.values():
             try:
-                if int(v) == val:
-                    return v
+                if int(candidate) == val:
+                    return candidate
             except Exception:
-                pass
-        # Fallback to enum constructor by value if available
+                continue
         try:
             return smr.EOperatorType(val)
         except Exception:
-            return val  # last resort; many bindings accept int-castable
+            return val
 
     s = str(name).strip()
-    # Handle patterns: unknown_#, numeric, or enum-like strings
-    m = re.fullmatch(r"unknown_(\d+)", s, flags=re.IGNORECASE)
-    if m:
-        return name_to_type(int(m.group(1)))
+    if not s:
+        raise KeyError("Operator type name cannot be empty.")
+
+    # Handle explicit unknown_X tokens
+    unknown_match = re.fullmatch(r"unknown_(\d+)", s, flags=re.IGNORECASE)
+    if unknown_match:
+        return name_to_type(int(unknown_match.group(1)))
     if s.isdigit():
         return name_to_type(int(s))
 
-    # Provide aliases for common short names used in Pipeline serialization
     alias: Dict[str, str] = {
-        "cvt_color": "CONVERT_COLOR",
-        "camera_access": "RECTIFIED_VST_ACCESS",
-        "run_algorithm": "RUN_MODEL_INFERENCE",
         "arithmetic": "ARITHMETIC_COMPOSE",
+        "camera_access": "RECTIFIED_VST_ACCESS",
+        "cvt_color": "CONVERT_COLOR",
+        "js_scripting": "JS_SCRIPTING",
+        "run_algorithm": "RUN_MODEL_INFERENCE",
+        "type_convert": "ASSIGNMENT",
     }
 
-    key = alias.get(s.lower())
-    if key and key in members:
-        return members[key]
+    lookup_key = alias.get(s.lower())
+    if lookup_key is None:
+        lookup_key = _normalize_operator_token(s)
 
-    # Normalize any other token to UPPER_CASE_WITH_UNDERSCORES and try direct match
-    norm = re.sub(r"[^0-9A-Za-z]+", "_", s).upper()
-    if norm in members:
-        return members[norm]
+    if lookup_key in members:
+        return members[lookup_key]
 
-    # As a last attempt, do a case-insensitive match over known members
-    for k, v in members.items():
-        if k.upper() == norm.upper():
-            return v
-
+    # Case-insensitive search as a final attempt
+    for key, value in members.items():
+        if key.upper() == lookup_key.upper():
+            return value
     raise KeyError(f"Unsupported operator type name: {name}")
 
 
 def type_to_name(op_type: smr.EOperatorType) -> str:
-    """Return a stable, human-friendly name for an operator type.
-
-    - Covers all smr.EOperatorType values dynamically.
-    - Produces lowercase_with_underscores.
-    - Keeps historical aliases for certain ops for compatibility.
-    - Falls back to "unknown_<id>" if not recognized.
-    """
+    """Return the canonical JSON `type` token for a SecureMR operator."""
     try:
         key_val = int(op_type)
     except Exception:
         key_val = int(op_type)
 
-    # Build reverse map: value -> enum member name
     value_to_name: Dict[int, str] = {}
     for attr in dir(smr.EOperatorType):
         if attr.startswith("__"):
             continue
         try:
-            val = getattr(smr.EOperatorType, attr)
-            value_to_name[int(val)] = attr
+            value_to_name[int(getattr(smr.EOperatorType, attr))] = attr
         except Exception:
             continue
 
@@ -323,16 +333,7 @@ def type_to_name(op_type: smr.EOperatorType) -> str:
     if not enum_name:
         return f"unknown_{key_val}"
 
-    # Normalize to lower_case_with_underscores
-    pretty = re.sub(r"[^0-9A-Za-z]+", "_", enum_name).lower()
-
-    # Historic aliases
-    if enum_name == "CONVERT_COLOR":
-        return "cvt_color"
-    if enum_name == "ARITHMETIC_COMPOSE":
-        return "arithmetic"
-
-    return pretty
+    return f"{_OP_ENUM_PREFIX}{enum_name}{_OP_ENUM_SUFFIX}"
 
 
 def _ensure_list_size(lst: List[typing.Optional[int]], size: int) -> None:
@@ -651,7 +652,7 @@ def add_vst_operator(pipeline, replace_pair):
 
     # Insert the VST access operator at the front to mirror a source op.
     vst_op = {
-        "type": "camera_access",  # alias for RECTIFIED_VST_ACCESS
+        "type": type_to_name(smr.EOperatorType.RECTIFIED_VST_ACCESS),
         "inputs": [],
         "outputs": [right_name, left_name, ts_name, cam_mat_name],
     }
@@ -722,7 +723,7 @@ def add_model_inference_operator(
 
     # Append operator entry
     op = {
-        "type": "run_algorithm",
+        "type": type_to_name(smr.EOperatorType.RUN_MODEL_INFERENCE),
         "inputs": model_input,
         "outputs": model_output,
         "model_asset": str(context_binary_file),
@@ -810,8 +811,15 @@ def convert_python_custom_to_run_algorithm(
 
     replaced = False
     for op in ops:
-        op_type = str(op.get("type", "")).lower()
-        if op_type not in {"python_custom", "custom"}:
+        op_enum: Optional[smr.EOperatorType]
+        try:
+            op_enum = name_to_type(op.get("type"))
+        except Exception:
+            op_enum = None
+        if op_enum is None:
+            if str(op.get("type", "")).strip().lower() != "custom":
+                continue
+        elif int(op_enum) != int(smr.EOperatorType.PYTHON_CUSTOM):
             continue
 
         input_tensors = _resolve_names(op.get("inputs"))
@@ -843,7 +851,7 @@ def convert_python_custom_to_run_algorithm(
                     f"QNN model output count ({len(qnn_outputs)}) does not match pipeline tensors ({len(output_tensors)})."
                 )
 
-        op["type"] = "run_algorithm"
+        op["type"] = type_to_name(smr.EOperatorType.RUN_MODEL_INFERENCE)
         op["inputs"] = _build_io_entries(input_tensors, qnn_inputs, spec)
         op["outputs"] = _build_io_entries(output_tensors, qnn_outputs, spec)
         op.pop("attrs", None)
@@ -954,8 +962,15 @@ def convert_run_algorithm_to_python_custom(
         raise ValueError("Unable to resolve model path for run_algorithm operator.")
 
     for op in operators:
-        op_type = str(op.get("type", "")).lower()
-        if op_type != "run_algorithm":
+        op_enum: Optional[smr.EOperatorType]
+        try:
+            op_enum = name_to_type(op.get("type"))
+        except Exception:
+            op_enum = None
+        if op_enum is None:
+            if str(op.get("type", "")).strip().lower() != "run_algorithm":
+                continue
+        elif int(op_enum) != int(smr.EOperatorType.RUN_MODEL_INFERENCE):
             continue
 
         input_tensors, operand_names = _extract_tensor_info(op.get("inputs"))
@@ -990,7 +1005,7 @@ def convert_run_algorithm_to_python_custom(
         registry[token] = custom_impl
 
         op.clear()
-        op["type"] = "python_custom"
+        op["type"] = type_to_name(smr.EOperatorType.PYTHON_CUSTOM)
         op["attrs"] = [f"token:{token}"]
         op["inputs"] = input_tensors
         op["outputs"] = output_tensors
@@ -1025,6 +1040,22 @@ class DeserializedPipeline:
         self.placeholder_map: Dict[int, smr.Tensor] = {}
         self._create_backing_tensors()
 
+    @staticmethod
+    def _resolve_tensor_ref(ref: Any) -> Optional[str]:
+        if isinstance(ref, str):
+            return ref if ref else None
+        if isinstance(ref, dict):
+            tensor = ref.get("tensor")
+            if tensor:
+                return str(tensor)
+            name = ref.get("name")
+            if name:
+                return str(name)
+            return None
+        if ref is None:
+            return None
+        return str(ref)
+
     def _build_graph(self) -> None:
         tensors = self.pipeline_spec.get("tensors", {})
         for name, t in tensors.items():
@@ -1049,20 +1080,26 @@ class DeserializedPipeline:
             attrs = self._prepare_operator_attrs(op, op_type)
             oid = self.pipeline.allocate_operator(op_type, attrs)
             proxy = self.pipeline.query_operator(oid)
-            for idx, name in enumerate(op.get("inputs", [])):
-                if not name:
+            for idx, ref in enumerate(op.get("inputs", [])):
+                tensor_name = self._resolve_tensor_ref(ref)
+                if not tensor_name:
                     continue
-                tid = self._name_to_id[name]
+                if tensor_name not in self._name_to_id:
+                    raise KeyError(f"Tensor '{tensor_name}' referenced by operator inputs is not defined.")
+                tid = self._name_to_id[tensor_name]
                 proxy.data_as_operand(self.pipeline.query_local_tensor(tid), idx)
-            for idx, name in enumerate(op.get("outputs", [])):
-                if not name:
+            for idx, ref in enumerate(op.get("outputs", [])):
+                tensor_name = self._resolve_tensor_ref(ref)
+                if not tensor_name:
                     continue
-                tid = self._name_to_id[name]
+                if tensor_name not in self._name_to_id:
+                    raise KeyError(f"Tensor '{tensor_name}' referenced by operator outputs is not defined.")
+                tid = self._name_to_id[tensor_name]
                 proxy.connect_result_to_data_array(idx, self.pipeline.query_local_tensor(tid))
 
             # Special handling: ASSIGNMENT slices wiring
             # TODO: remove special handling
-            if str(type_name).lower() == "assignment":
+            if int(op_type) == int(smr.EOperatorType.ASSIGNMENT):
                 src_slices = op.get("src_slices")
                 dst_slices = op.get("dst_slices")
                 def _make_slice_tensor(arr: np.ndarray) -> smr.Tensor:
@@ -1224,14 +1261,23 @@ class DeserializedPipeline:
 
     def _prepare_operator_attrs(self, op: Dict[str, Any], op_type: smr.EOperatorType) -> List[str]:
         attrs: List[str] = [str(a) for a in op.get("attrs", [])]
+        op_enum: Optional[smr.EOperatorType]
+        try:
+            op_enum = name_to_type(op.get("type"))
+        except Exception:
+            op_enum = None
         if not attrs:
             if "flag" in op:
                 attrs = [str(op.get("flag"))]
             if "expression" in op:
                 attrs = [str(op.get("expression"))]
-            if str(op.get("type", "")).lower() == "nms" and "threshold" in op:
+            if (
+                op_enum is not None
+                and int(op_enum) == int(smr.EOperatorType.NMS)
+                and "threshold" in op
+            ):
                 attrs = [str(op.get("threshold"))]
-            if str(op.get("type", "")).lower() == "sort_mat":
+            if op_enum is not None and int(op_enum) == int(smr.EOperatorType.SORT_MAT):
                 mode = op.get("mode") or op.get("axis")
                 if mode is not None:
                     attrs = [str(mode)]

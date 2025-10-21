@@ -6,7 +6,7 @@ import pytest
 
 import securemr as smr
 from securemr.qnn_to_pipeline import build_pipeline_spec, save_pipeline
-from securemr.serialization import DeserializedPipeline
+from securemr.serialization import DeserializedPipeline, type_to_name
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("QNN_SDK_ROOT"),
@@ -33,8 +33,8 @@ def test_qnn_pipeline_execution(tmp_path):
     spec = build_pipeline_spec(str(context_binary))
 
     assert len(spec["operators"]) == 2
-    assert spec["operators"][0]["type"] == "js_scripting"
-    assert spec["operators"][1]["type"] == "run_algorithm"
+    assert spec["operators"][0]["type"] == type_to_name(smr.EOperatorType.JS_SCRIPTING)
+    assert spec["operators"][1]["type"] == type_to_name(smr.EOperatorType.RUN_MODEL_INFERENCE)
 
     pipeline_path = tmp_path / "pipeline.json"
     save_pipeline(spec, pipeline_path)

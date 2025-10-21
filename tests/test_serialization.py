@@ -9,7 +9,7 @@ import tempfile
 import numpy as np
 
 import securemr as smr
-from securemr.serialization import DeserializedPipeline
+from securemr.serialization import DeserializedPipeline, type_to_name
 
 
 def test_deserialized_pipeline_basic():
@@ -66,7 +66,7 @@ def test_deserialized_pipeline_basic():
         },
         "operators": [
             {
-                "type": "arithmetic",
+                "type": type_to_name(smr.EOperatorType.ARITHMETIC_COMPOSE),
                 "expression": "{0} + 2.0",
                 "inputs": ["input_tensor"],
                 "outputs": ["output_tensor"]
