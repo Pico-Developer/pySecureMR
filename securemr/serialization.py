@@ -1245,11 +1245,9 @@ class DeserializedPipeline:
         task.setup_place_holder_mapping()
         pool = smr.ThreadPool2()
         pool.enqueue(task)
-
-        for _ in range(timeout * 100):
-            if not self.pipeline.cannot_modified():
-                break
-            time.sleep(0.01)
+        
+        while self.pipeline.cannot_modified():
+            time.sleep(0.5)
 
         if not self._outputs_names:
             return ph_map
