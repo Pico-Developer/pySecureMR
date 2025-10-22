@@ -49,6 +49,7 @@ class ModelInferenceOperator(PyOperatorBase, CustomOperatorBase):
         operand_names: List[str] = ["input"],
         result_names: List[str] = ["predictions"],
         output_node_ids: str = None,
+        dump_output: str = None,
     ):
         PyOperatorBase.__init__(self)
         CustomOperatorBase.__init__(self, operand_names=operand_names, result_names=result_names)
@@ -115,6 +116,12 @@ class ModelInferenceOperator(PyOperatorBase, CustomOperatorBase):
             raise NotImplementedError("Unsupported model format. Expect .onnx or .bin")
         self._output_shapes = self._model.output_shapes
 
+        if dump_output:
+            if os.path.exists(dump_output):
+                os.system(f"rm -r {dump_output}")
+            os.makedirs(dump_output, exist_ok=True)
+        self.dump_output = dump_output
+
     def forward(self, stream_id: int = 0) -> None:
         self.compute(stream_id, self._operands, self._results)
 
@@ -141,6 +148,16 @@ class ModelInferenceOperator(PyOperatorBase, CustomOperatorBase):
         print(">> [PY] forward ...")
         y_np = self.forward_numpy(prepared)
         print(">> [PY] forward done")
+
+        if self.dump_output:
+            print(prepared.shape)
+            savename_input = os.path.join(self.dump_output, "input_1_0_images.bin")
+            savename_output = os.path.join(self.dump_output, "output_1_3_output.bin")
+            with open(savename_input, "wb") as f:
+                prepared.astype(np.float32).tofile(f)
+            with open(savename_output, "wb") as f:
+                y_np[0].astype(np.float32).tofile(f)
+            print(f"Dump model input and output to {self.dump_output}")
         
         assert len(y_np) == len(results), f"len of result  ({len(results)}) != len of model output ({len(y_np)})"
         for i in range(len(results)):
