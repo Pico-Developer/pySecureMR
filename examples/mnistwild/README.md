@@ -1,4 +1,4 @@
-# MNIST Wild Example
+# Example: MNIST Recognition
 
 This sample demonstrates how to take a high-resolution street photo that contains a handwritten digit, prepare it for MNIST inference with SecureMR, and extend the preprocessing graph with secure model execution operators.
 
@@ -29,7 +29,7 @@ Successful execution prints the predicted class and confidence for `number_5.png
 ## Pipeline visualization
 The rendered graph below mirrors the operators described above. Open it in a browser if the embedded view does not load in your Markdown viewer.
 
-<iframe src="mnist_pipeline_vis.html" title="MNIST Wild Pipeline" width="100%" height="600"></iframe>
+![](./mnist_pipeline_vis.png)
 
 ## Key files
 - `mnistwild.py`: Imperative preprocessing, pipeline construction, and inference script.
