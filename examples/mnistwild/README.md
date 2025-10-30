@@ -27,12 +27,12 @@ python mnistwild.py
 Successful execution prints the predicted class and confidence for `number_5.png`, and emits an updated `mnist_pipeline.json` that contains the VST and model inference nodes.
 
 ## Pipeline visualization
-The rendered graph below mirrors the operators described above. Open it in a browser if the embedded view does not load in your Markdown viewer.
+The rendered graph below mirrors the operators described above.
 
 ![](./mnist_pipeline_vis.png)
 
 ## Key files
 - `mnistwild.py`: Imperative preprocessing, pipeline construction, and inference script.
 - `mnist_pipeline.json`: Serialized SecureMR pipeline with VST and MNIST inference operators.
-- `mnist_pipeline_vis.html`: Standalone visualization of the exported pipeline graph (embedded above).
+- `mnist.serialized.bin`: MNIST classification model in QNN context binary format.
 - `number_5.png`: Sample capture used to drive the example (see also `number_2.png` for experimentation).
