@@ -16,6 +16,7 @@
 import os
 import subprocess as commands
 from typing import Any, Dict, Optional, Sequence, Tuple
+from enum import Enum
 
 import numpy as np
 
@@ -38,6 +39,7 @@ __all__ = [
     "numpy_dtype_to_smr",
     "qnn_dtype_to_smr",
     "ensure_tensor_dimensions",
+    "TensorType",
 ]
 
 
@@ -131,6 +133,15 @@ NUMPY_TO_SMR_DATATYPE: Dict[Any, EDataType] = {
     np.float32: EDataType.FLOAT32,
     np.float64: EDataType.FLOAT64,
 }
+
+class TensorType(Enum):
+    POINT = 1
+    SCALAR = 2
+    SLICE = 3
+    COLOR = 4
+    TIMESTAMP = 5
+    MAT = 6
+    GLTF = 7
 
 
 def convert_to_dtype(data_type: int, target: str = "numpy"):

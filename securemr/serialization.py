@@ -40,6 +40,7 @@ from .utils import (
     normalize_qnn_dtype,
     numpy_dtype_to_smr,
     unmat_flag,
+    TensorType,
 )
 
 __all__ = [
@@ -163,7 +164,7 @@ def _ensure_tensor_from_q_info(spec: Dict[str, Any], tensor_name: str, q_info: O
                 "is_placeholder": False}
     tensor_desc = tensors.get(tensor_name)
     if "usage" not in tensor_desc:
-        tensor_desc["usage"] = 6
+        tensor_desc["usage"] = int(TensorType.MAT)
     if "value" not in tensor_desc:
         tensor_desc["value"] = None
 
@@ -368,6 +369,7 @@ class Pipeline(smr.Pipeline):
                        is_placeholder: bool,
                        name: str,
                        value: np.ndarray,
+                       usage: TensorType,
                        ) -> None:
         # generate a deterministic name for this tensor id if not present
         if not name:
@@ -382,26 +384,26 @@ class Pipeline(smr.Pipeline):
             data_type_val = convert_from_dtype(np.float32)
         else:
             raise NotImplementedError
-
+        
         self.spec["tensors"][name] = {
             "dimensions": list(shape),
             "channels": int(channels) if channels > 0 else 1,
             "data_type": int(data_type_val),
             "is_placeholder": bool(is_placeholder),
-            "usage": 6,
+            "usage": usage.value,
             # keep flag for lossless reconstruction
             "flag": int(flag),
             "value": [float(x) for x in value.flatten()] if value is not None else None,
         }
 
-    def allocate_placeholder(self, shape: Iterable[int], flag: int, name: str = None):
+    def allocate_placeholder(self, shape: Iterable[int], flag: int, name: str = None, usage: TensorType = TensorType.MAT):
         tid = super(Pipeline, self).allocate_placeholder(shape, flag)
-        self._record_tensor(int(tid), shape, flag, True, name, None)
+        self._record_tensor(int(tid), shape, flag, True, name, None, usage)
         return tid
 
-    def allocate_local_tensor(self, shape: Iterable[int], flag: int, name: str = None, value: np.ndarray = None):
+    def allocate_local_tensor(self, shape: Iterable[int], flag: int, name: str = None, value: np.ndarray = None, usage: TensorType = TensorType.MAT):
         tid = super(Pipeline, self).allocate_local_tensor(shape, flag)
-        self._record_tensor(int(tid), shape, flag, False, name, value)
+        self._record_tensor(int(tid), shape, flag, False, name, value, usage)
         return tid
 
     def query_local_tensor(self, tensor_id: int):
@@ -470,41 +472,6 @@ class Pipeline(smr.Pipeline):
                 return self._real.connect_result_to_data_array(index, tensor)
 
         return _OpProxy(real_op)
-    
-    def register_tensor(self, name, tensor, with_value=True):
-        """Record a non-placeholder tensor with concrete values into spec.
-
-        The tensor won't be allocated into the graph automatically; this API only
-        records metadata and data for serialization. DeserializedPipeline will
-        allocate it as a placeholder with preloaded data so it can be used as an
-        operand if referenced by operators by name.
-        """
-        np_array = tensor.numpy()
-        if np_array.ndim == 1:
-            dimensions = [int(np_array.shape[0])]
-            channels = 1
-        elif np_array.ndim == 2:
-            dimensions = [int(x) for x in np_array.shape[:2]]
-            channels = 1
-        elif np_array.ndim == 3:
-            dimensions = [int(x) for x in np_array.shape[:2]]
-            channels = int(np_array.shape[2])
-        else:
-            raise NotImplementedError
-
-        entry = {
-            "dimensions": dimensions,
-            "channels": channels,
-            "data_type": convert_from_dtype(np_array.dtype),
-            "is_placeholder": False,
-            "usage": 6,
-            # put a generic MAT flag derived from dtype+channels
-            "flag": int(smr.BaseType.MAT) | (int(smr.BaseType.CHANNEL_MASK) & channels) | int(entry["data_type"]) if False else 0,
-        }
-        if with_value:
-            entry["data"] = [float(x) for x in np_array.flatten()]
-        self.spec["tensors"][name] = entry
-
 
     def set_inputs(self, inputs: Union[int, str, Iterable[Union[int, str]]]):
         items = as_list(inputs)
@@ -616,9 +583,15 @@ class Pipeline(smr.Pipeline):
         for name, desc in self.spec["tensors"].items():
             desc["is_placeholder"] = name in io
 
+    def _remove_attrs(self) -> None:
+        """Remove attrs in operator field before save to json."""
+        for op in self.spec["operators"]:
+            op.pop("attrs", None)
+
     def save(self, file_path):
         # Normalize placeholder flags before saving
         self._normalize_placeholders()
+        self._remove_attrs()
         with open(file_path, 'w', encoding='utf-8') as f:
             json.dump(self.spec, f, indent=2, ensure_ascii=False)
 
@@ -1265,11 +1238,11 @@ class DeserializedPipeline:
         except Exception:
             op_enum = None
         if not attrs:
-            if "flag" in op:
+            if "flag" in op:            # XR_SECURE_MR_OPERATOR_TYPE_CONVERT_COLOR_PICO
                 attrs = [str(op.get("flag"))]
-            if "expression" in op:
+            if "expression" in op:      # XR_SECURE_MR_OPERATOR_TYPE_ASSIGNMENT_PICO
                 attrs = [str(op.get("expression"))]
-            if (
+            if (                        # NMS
                 op_enum is not None
                 and int(op_enum) == int(smr.EOperatorType.NMS)
                 and "threshold" in op

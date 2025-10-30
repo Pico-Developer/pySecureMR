@@ -27,6 +27,7 @@ from securemr.serialization import (
     add_model_inference_operator,
     mat_flag,
 )
+from securemr.utils import TensorType
 
 ROOT = pathlib.Path(__file__).parent.resolve()
 PIPE_JSON = str(ROOT / "mnist_pipeline.json")
@@ -186,8 +187,8 @@ def preprocess_pipeline(image_path: str):
     # Only inputs/outputs are placeholders; intermediates are local tensors
     ph_img = p.allocate_placeholder(list(img.shape[:2]), mat_flag(smr.EDataType.UINT8, 3), "image")
     # src_points/dst_points should be local tensors (constants)
-    ph_src = p.allocate_local_tensor([3], _pt2_flag(), "src_points", value=src_points.numpy())
-    ph_dst = p.allocate_local_tensor([3], _pt2_flag(), "dst_points", value=dst_points.numpy())
+    ph_src = p.allocate_local_tensor([3], _pt2_flag(), "src_points", value=src_points.numpy(), usage=TensorType.POINT)
+    ph_dst = p.allocate_local_tensor([3], _pt2_flag(), "dst_points", value=dst_points.numpy(), usage=TensorType.POINT)
     # local tensors for intermediate results
     ph_aff = p.allocate_local_tensor([2, 3], mat_flag(smr.EDataType.FLOAT32, 1), "affine")
     ph_y1 = p.allocate_local_tensor([crop_height, crop_width], mat_flag(smr.EDataType.UINT8, 3), "crop_rgb_tensor")
@@ -242,7 +243,7 @@ def preprocess_pipeline(image_path: str):
     
     # ASSIGNMENT(uint8->uint8, local_tensor to global tensor)
     op_assign_2 = p.query_operator(op_assign_2)
-    op_assign_2.data_as_operand(lt_img, 0)
+    op_assign_2.data_as_operand(lt_y1, 0)
     op_assign_2.connect_result_to_data_array(0, lt_y5)
 
     # ARITHMETIC_COMPOSE(y3/255.0)->y4
