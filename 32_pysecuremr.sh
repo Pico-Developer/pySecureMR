@@ -1,0 +1,1 @@
+/home/duino/prd/daily/q1-okr/32_pysecuremr.sh

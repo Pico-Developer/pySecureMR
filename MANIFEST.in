@@ -8,3 +8,5 @@ include securemr/_bindings/libopencv_imgproc.so.3.4
 include securemr/_bindings/libopenmr-backend.so
 include securemr/_bindings/libSNPE.so
 include securemr/_bindings/_securemr.cpython-310-x86_64-linux-gnu.so
+include securemr/inspect/apks/model_inspect-debug.apk
+include securemr/inspect/apks/pipeline_inspect-debug.apk
