@@ -98,7 +98,7 @@ Refer to [test code](./tests) to learn more about the usage.
 
 Install qnn. Only tested on Ubuntu22.04 & python3.10
 ```
-python3 -m securemr.install_qnn
+python3 -m securemr.qnn.install_qnn
 ```
 
 Run pytorch-to-qnn test and run on android device.

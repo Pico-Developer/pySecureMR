@@ -4,8 +4,8 @@ import numpy as np
 import securemr as smr
 
 from .custom_operator import CustomOperatorBase
-from ..qnn_model import QnnModel
-from ..onnx_to_qnn import onnx_to_qnn as convert_onnx_to_qnn
+from ..qnn.qnn_model import QnnModel
+from ..qnn.onnx_to_qnn import onnx_to_qnn as convert_onnx_to_qnn
 
 try:
     import onnxruntime as ort
@@ -37,7 +37,7 @@ class ModelInferenceOperator(PyOperatorBase, CustomOperatorBase):
     Behavior:
       - If model_path endswith .bin: use securemr.QnnModel.
       - If model_path endswith .onnx and onnx_to_qnn=False: use onnxruntime.
-      - If model_path endswith .onnx and onnx_to_qnn=True: convert via securemr.onnx_to_qnn then use QnnModel.
+      - If model_path endswith .onnx and onnx_to_qnn=True: convert via securemr.qnn.onnx_to_qnn then use QnnModel.
     """
 
     def __init__(
@@ -65,6 +65,8 @@ class ModelInferenceOperator(PyOperatorBase, CustomOperatorBase):
         is_cpu = dev == "cpu"
 
         if model_path.endswith(".bin"):
+            if not smr.HAS_BINDINGS:
+                raise RuntimeError("QNN inference requires Linux native bindings.")
             target = "android" if str(device) == "android" else "host"
             self._model = QnnModel(model_path, target, output_node_ids)
             self._backend = "qnn"
@@ -76,6 +78,8 @@ class ModelInferenceOperator(PyOperatorBase, CustomOperatorBase):
                 self._model.set_target(target)
                 self._backend = "qnn"
             else:
+                if ort is None:
+                    raise RuntimeError("onnxruntime is required for ONNX inference.")
                 so = ort.SessionOptions()
                 so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
                 so.execution_mode = ort.ExecutionMode.ORT_PARALLEL
@@ -114,7 +118,7 @@ class ModelInferenceOperator(PyOperatorBase, CustomOperatorBase):
                 self._backend = "ort"
         else:
             raise NotImplementedError("Unsupported model format. Expect .onnx or .bin")
-        self._output_shapes = self._model.output_shapes
+        self._output_shapes = self._model.output_shapes if self._model is not None else None
 
         if dump_output:
             if os.path.exists(dump_output):
@@ -163,11 +167,16 @@ class ModelInferenceOperator(PyOperatorBase, CustomOperatorBase):
         for i in range(len(results)):
             if results and results[i] is not None and hasattr(results[i], "load_from_raw_byte_arrays"):
                 results[i].load_from_raw_byte_arrays(y_np[i].tobytes())
-            else:
+            elif smr.HAS_BINDINGS:
                 results[i] = smr.TensorMat.from_numpy(y_np[i])
+            else:
+                results[i] = y_np[i]
 
     def _prepare_input(self, tensor: Any) -> np.ndarray:
-        arr = tensor.numpy()
+        if isinstance(tensor, np.ndarray):
+            arr = tensor
+        else:
+            arr = tensor.numpy()
         if arr.ndim == 4 and arr.shape[1] in (1, 3):    # channels can only be 1 or 3
             prepared = arr.astype(np.float32, copy=False)
         else:

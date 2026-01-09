@@ -33,7 +33,7 @@ import securemr as smr
 import re
 from securemr.operators import custom_operator as custom_ops
 
-from .utils import (
+from .core.utils import (
     convert_from_dtype,
     convert_to_dtype,
     mat_flag,

@@ -5,7 +5,16 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Iterable, List, Optional, Sequence, Dict
 
-from .._bindings import _securemr
+from ..bindings import BindingsUnavailableError, bindings_available, load_bindings
+
+try:  # pragma: no cover - depends on bindings availability
+    if bindings_available():
+        load_bindings()
+        from ..bindings.linux import _securemr  # type: ignore
+    else:
+        _securemr = None
+except Exception:  # noqa: BLE001
+    _securemr = None
 
 
 _TOKEN_TO_IMPLEMENTATION: Dict[str, "CustomOperatorBase"] = {}
@@ -16,6 +25,10 @@ class CustomOperatorHandle:
 
     def __init__(self, implementation: "CustomOperatorBase") -> None:
         self._implementation = implementation
+        if _securemr is None:
+            raise BindingsUnavailableError(
+                "Custom operators require native bindings to be loaded."
+            )
         self._token: Optional[str] = _securemr.register_custom_operator(implementation)
         self._released = False
         if self._token is not None:
@@ -33,6 +46,10 @@ class CustomOperatorHandle:
     def release(self) -> None:
         if self._token is None or self._released:
             return
+        if _securemr is None:
+            raise BindingsUnavailableError(
+                "Custom operators require native bindings to be loaded."
+            )
         _securemr.release_custom_operator(self._token)
         self._released = True
         if self._token in _TOKEN_TO_IMPLEMENTATION:

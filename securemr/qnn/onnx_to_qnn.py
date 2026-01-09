@@ -18,9 +18,9 @@ import shutil
 import tempfile
 from typing import List, Tuple
 
-from .generate_info import main as generate_info_main
+from ..generate_info import main as generate_info_main
 from .qnn_model import QnnModel
-from .utils import DEBUG_QNN, run, ONNX_INSTALLED
+from ..core.utils import DEBUG_QNN, run, ONNX_INSTALLED
 
 if ONNX_INSTALLED:
     import onnx

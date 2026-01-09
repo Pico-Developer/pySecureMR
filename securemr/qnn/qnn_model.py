@@ -25,12 +25,13 @@ import subprocess
 import tempfile
 import time
 import glob
+import sys
 from pathlib import Path
 from typing import List
 
 import numpy as np
 
-from .utils import DEBUG_QNN, TORCH_INSTALLED
+from ..core.utils import DEBUG_QNN, TORCH_INSTALLED
 
 if TORCH_INSTALLED:
     import torch
@@ -124,6 +125,8 @@ class QnnModel:
             output_node_ids : str
                 List of output node IDs for the model, split by comma
         """
+        if not sys.platform.startswith("linux"):
+            raise RuntimeError("QNN runtime is only supported on Linux.")
         self.QNN_SDK_ROOT = os.getenv("QNN_SDK_ROOT")
         assert self.QNN_SDK_ROOT, "Please set QNN_SDK_ROOT env."
 

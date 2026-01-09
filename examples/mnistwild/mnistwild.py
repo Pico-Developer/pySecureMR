@@ -27,7 +27,7 @@ from securemr.serialization import (
     add_model_inference_operator,
     mat_flag,
 )
-from securemr.utils import TensorType
+from securemr.core.utils import TensorType
 
 ROOT = pathlib.Path(__file__).parent.resolve()
 PIPE_JSON = str(ROOT / "mnist_pipeline.json")

@@ -14,7 +14,7 @@
 """Install qnn toolchain."""
 from pathlib import Path
 import os
-from .utils import run
+from ..core.utils import run
 
 
 def download_if_need(qnn_version="2.29.0.241129"):

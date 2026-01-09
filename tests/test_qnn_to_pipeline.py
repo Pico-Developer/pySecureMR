@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 import securemr as smr
-from securemr.qnn_to_pipeline import build_pipeline_spec, save_pipeline
+from securemr.qnn.qnn_to_pipeline import build_pipeline_spec, save_pipeline
 from securemr.serialization import DeserializedPipeline, type_to_name
 
 pytestmark = pytest.mark.skipif(

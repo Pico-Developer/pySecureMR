@@ -26,7 +26,7 @@ def test_model_inspect_mnist() -> None:
         [
             sys.executable,
             "-m",
-            "securemr.model_inspect",
+            "securemr.inspect.model_cli",
             "--model",
             str(MNIST_ROOT / "mnist.serialized.bin"),
             "--json",
@@ -42,7 +42,7 @@ def test_pipeline_inspect_mnist() -> None:
         [
             sys.executable,
             "-m",
-            "securemr.pipeline_inspect",
+            "securemr.inspect.pipeline_cli",
             "--pipeline",
             str(MNIST_ROOT / "mnist_pipeline.json"),
         ],
@@ -57,7 +57,7 @@ def test_pipeline_inspect_mnist_with_input() -> None:
         [
             sys.executable,
             "-m",
-            "securemr.pipeline_inspect",
+            "securemr.inspect.pipeline_cli",
             "--pipeline",
             str(MNIST_ROOT / "mnist_pipeline.json"),
             "--input",
@@ -76,7 +76,7 @@ def test_pipeline_inspect_mnist_with_outputs() -> None:
         [
             sys.executable,
             "-m",
-            "securemr.pipeline_inspect",
+            "securemr.inspect.pipeline_cli",
             "--pipeline",
             str(MNIST_ROOT / "mnist_pipeline.json"),
             "--input",

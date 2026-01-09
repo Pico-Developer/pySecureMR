@@ -38,7 +38,7 @@ def test_host():
     torch_model = models.resnet18(pretrained=True)
     torch_model.eval()
 
-    qnn_model = securemr.pytorch_to_qnn(torch_model, "1,3,224,224")
+    qnn_model = securemr.qnn.pytorch_to_qnn(torch_model, "1,3,224,224")
     input_shape = [1, 3, 224, 224]
     input_data = torch.randn(input_shape)
 
@@ -53,7 +53,7 @@ def test_android():
     torch_model = models.resnet18(pretrained=True)
     torch_model.eval()
 
-    qnn_model = securemr.pytorch_to_qnn(torch_model, "1,3,224,224")
+    qnn_model = securemr.qnn.pytorch_to_qnn(torch_model, "1,3,224,224")
     qnn_model.set_target("android")
 
     input_shape = [1, 3, 224, 224]
