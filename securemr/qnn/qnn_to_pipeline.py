@@ -173,6 +173,7 @@ def _make_tensor_entry(info: TensorInfo, *, is_placeholder: bool) -> Dict:
         "flag": flag,
     }
 
+
 def _make_dummy_tensor(is_placeholder: bool) -> Dict:
     flag = mat_flag(smr.EDataType.FLOAT32, 1)
     return {
