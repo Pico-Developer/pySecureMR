@@ -46,6 +46,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         default="",
         help="Path to pipeline_inspect APK (optional)",
     )
+    parser.add_argument(
+        "--force-install-apk",
+        action="store_true",
+        help="Force install pipeline_inspect APK even if it already exists",
+    )
     return parser.parse_args(argv)
 
 
@@ -55,11 +60,11 @@ def resolve_apk_path(user_path: str) -> Path:
     return Path(__file__).resolve().parent / "apks" / "pipeline_inspect-debug.apk"
 
 
-def prepare_device(device: DeviceContext, apk_path: Path) -> None:
+def prepare_device(device: DeviceContext, apk_path: Path, force_install: bool = False) -> None:
     if not apk_path.exists():
         raise FileNotFoundError(f"APK not found: {apk_path}")
     print("Installing pipeline_inspect APK...")
-    install_apk(device, str(apk_path), PACKAGE_NAME)
+    install_apk(device, str(apk_path), PACKAGE_NAME, force=force_install)
 
 
 def clean_device_dirs(device: DeviceContext, tmp_dir: str, output_dirs: list[str]) -> None:
@@ -115,7 +120,7 @@ def run_pipeline_inspect(args: argparse.Namespace) -> int:
 
     device = select_device(args.device)
     apk_path = resolve_apk_path(args.apk)
-    prepare_device(device, apk_path)
+    prepare_device(device, apk_path, force_install=args.force_install_apk)
 
     device_tmp_dir = f"/sdcard/Android/data/{PACKAGE_NAME}/files"
     device_pipeline_path = f"{device_tmp_dir}/pipeline.json"
@@ -128,6 +133,12 @@ def run_pipeline_inspect(args: argparse.Namespace) -> int:
 
     print("Pushing pipeline to device...")
     run_adb(["push", str(pipeline_file), device_pipeline_path], device)
+
+    # Also push any .bin files in the same directory as the pipeline file
+    pipeline_dir = pipeline_file.parent
+    for bin_file in pipeline_dir.glob("*.bin"):
+        print(f"Pushing model/binary file {bin_file.name} to {device_tmp_dir}...")
+        run_adb(["push", str(bin_file), device_tmp_dir + "/"], device)
 
     if args.input:
         remote_input = device_input_path(args.input, device_tmp_dir)

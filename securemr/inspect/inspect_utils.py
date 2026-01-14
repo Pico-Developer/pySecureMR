@@ -110,7 +110,7 @@ def start_logcat(package: str, regex: str, device: DeviceContext) -> subprocess.
     return subprocess.Popen(cmd)
 
 
-def install_apk(device: DeviceContext, apk_path: str, package_name: str) -> None:
+def install_apk(device: DeviceContext, apk_path: str, package_name: str, force: bool = False) -> None:
     adb_host = os.getenv("ADB_HOST", "host.docker.internal" if os.path.exists("/.dockerenv") else "127.0.0.1")
     adb_port = int(os.getenv("ADB_PORT", "5037"))
     client = AdbClient(host=adb_host, port=adb_port)
@@ -126,7 +126,7 @@ def install_apk(device: DeviceContext, apk_path: str, package_name: str) -> None
     except Exception as exc:  # noqa: BLE001
         raise AdbError(f"Failed to query installed packages: {exc}") from exc
 
-    if f"package:{package_name}" in listed:
+    if not force and f"package:{package_name}" in listed:
         print("APK exists, skip installation.")
         return
 
