@@ -59,3 +59,4 @@ docs/_build
 !docs/source/_static/*.png
 
 examples/mnistwild/mnist_pipeline_vis.html
+32_pysecuremr.sh
