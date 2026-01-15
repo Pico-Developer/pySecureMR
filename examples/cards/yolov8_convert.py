@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[1]
 PIPELINE_JSON = ROOT / "yolov8s_cards_pipeline.json"
 MODEL_ASSET = "yolov8s_playing_cards.serialized.bin"
-DEVICE_MODEL_DIR = "/sdcard/Android/data/com.bytedance.pico.secure_mr_demo.pipeline_inspect/files"
+DEVICE_MODEL_DIR = "/sdcard/Android/data/com.bytedance.pico.secure_mr_demo.pipeline_inspect/files"  # used for model_file path
 
 
 def letterbox(img: np.ndarray, target: Tuple[int, int]) -> Tuple[np.ndarray, float, Tuple[int, int]]:
@@ -279,8 +279,8 @@ def build_pipeline_spec(img_shape: Tuple[int, int], target: int = 416) -> Dict:
             "flag": mat_flag(smr.EDataType.FLOAT32, 3),
         },
         "model_output0": {
-            "dimensions": [56, 1],
-            "channels": 3549,
+            "dimensions": [56, 3549],
+            "channels": 1,
             "data_type": convert_from_dtype(np.float32),
             "is_placeholder": True,
             "usage": int(2),
@@ -333,8 +333,7 @@ def build_pipeline_spec(img_shape: Tuple[int, int], target: int = 416) -> Dict:
             "inputs": [{"name": "images", "tensor": "normalized"}],
             "outputs": [{"name": "output0", "tensor": "model_output0"}],
             "model_name": "yolov8s_playing_cards",
-            "model": MODEL_ASSET,
-            "model_dir": DEVICE_MODEL_DIR,
+            "model_file": f"{DEVICE_MODEL_DIR}/{MODEL_ASSET}",
         },
     ]
 

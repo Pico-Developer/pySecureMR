@@ -19,15 +19,16 @@ echo "
 # Steps（必须先给 plan）
 1. 理解${python_code}的pipeline流程，包括前处理、模型infer、后处理。
 2. 利用spatialml skill，理解securemr operators
-3. 参考mnistwild.py，实现一个yolov8_convert.py，把python实现的逻辑，转为securemr operators实现，并保存json
-4. 利用spatialml skill，在设备上测试生成的pipeline json
-5. 如果log报错，fix，直到log正常跑没报错
-6. 给定和python相同的input，对比output的数值一致性。如果不一致，可以尝试分段检查。
+3. 梳理${python_code}的pipeline中的operator，和securemr operator的对应关系，或者实现计划
+4. 参考mnistwild.py，实现一个yolov8_convert.py，把python实现的逻辑，转为securemr operators实现，并保存json
+5. 利用spatialml skill，在设备上测试生成的pipeline json
+6. 如果log报错，fix，直到log正常跑没报错
+7. 给定和python相同的input，对比output的数值一致性。如果不一致，可以尝试分段检查。
     先检查前处理的输出是否一致，
     再检查模型infer的输出是否一致，
     最后检查后处理的输出是否一致。
-7. 如果数值不一致，fix，直到数值一致。
-8. 可视化pipeline json保存的结果，和python结果做对比。
+8. 如果数值不一致，fix，直到数值一致。
+9. 可视化pipeline json保存的结果，和python结果做对比。
 
 # Done（可自动验证）
 1. python ${python_code} 运行的结果，和利用pipeline inspect工具(python -m securemr.inspect.pipeline_cli)得到的结果，数值一致。

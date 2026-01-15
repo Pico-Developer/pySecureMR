@@ -238,8 +238,7 @@ def build_pipeline_spec(
             {"name": info.qnn_name, "tensor": info.tensor_name} for info in output_infos
         ],
         "model_name": os.path.basename(context_binary).split(".")[0],
-        "model": os.path.basename(context_binary),
-        "model_dir": os.path.dirname(context_binary)
+        "model_asset": context_binary,
     }
 
     spec = {

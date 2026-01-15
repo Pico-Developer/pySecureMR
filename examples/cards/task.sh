@@ -1,5 +1,6 @@
 python_code="infer_cards_onnx.py"
-pysecuremr="../../pySecureMR"
+pysecuremr="../../"
+output=yolov8_convert.py
 
 echo "
 # Goal（一句话）
@@ -20,7 +21,7 @@ echo "
 # Steps（必须先给 plan）
 1. 理解${python_code}的pipeline流程，包括前处理、模型infer、后处理。
 2. 利用spatialml skill，理解securemr operators
-3. 参考mnistwild.py，实现一个yolov8_convert.py，把python实现的逻辑，转为securemr operators实现，并保存json
+3. 参考mnistwild.py，实现一个${output}，把python实现的逻辑，转为securemr operators实现，并保存json
 4. 利用spatialml skill，在设备上测试生成的pipeline json
 5. 如果log报错，fix，直到log正常跑没报错
 6. 给定和python相同的input，对比output的数值一致性。如果不一致，可以尝试分段检查。
