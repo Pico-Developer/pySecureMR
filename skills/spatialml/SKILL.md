@@ -92,6 +92,12 @@ You can also generate `pipeline.json` derectly from context binary file to get a
 python3.10 -m securemr.qnn.qnn_to_pipeline /path/to/qnn_context.bin --output /path/to/pipeline.json
 ```
 
+### Visualize pipeline JSON
+
+```
+python3.10 -m securemr.viz.pipeline_viz <path-to-pipeline.json>
+```
+
 ## Resources
 
 ### scripts/
@@ -101,4 +107,5 @@ python3.10 -m securemr.qnn.qnn_to_pipeline /path/to/qnn_context.bin --output /pa
 ### reference/
 
 - `pipeline_json_spec.md`: Specification for securemr pipeline json. You should refer this if you need to dump securemr pipeline to json.
+
 - `operator_tips.md`: If you find operator is not supported in pipeline_json_spec.md, read operator_tips.md for advanced tricks to implement it.
