@@ -52,6 +52,7 @@ except Exception:  # noqa: BLE001
         CHANNEL_MASK = 0xFF
 
     class EOperatorType(IntEnum):
+        UNKNOWN = 0
         ARITHMETIC_COMPOSE = 1
         ELEMENTWISE_MIN = 4
         ELEMENTWISE_MAX = 5
@@ -76,13 +77,16 @@ except Exception:  # noqa: BLE001
         CONVERT_COLOR = 25
         SORT_VEC = 26
         INVERSION = 27
-        MAKE_TRANSFORM_MAT = 28
+        GET_TRANSFORM_MAT = 28
         SORT_MAT = 29
         SWITCH_GLTF_RENDER_STATUS = 30
         UPDATE_GLTF = 31
         RENDER_TEXT = 32
-        UPLOAD_TEXTURE_TO_GLTF = 33
-        JS_SCRIPTING = 34
+        LOAD_TEXTURE = 33
+        SVD = 34
+        NORM = 35
+        SWAP_HWC_CHW = 36
+        JAVASCRIPT = 39
         PYTHON_CUSTOM = 1000
 
 
