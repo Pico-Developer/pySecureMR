@@ -1,4 +1,5 @@
 card_*.bin
 card_*.jpeg
+debug*
 tmp_data
 baseline_model_output.bin

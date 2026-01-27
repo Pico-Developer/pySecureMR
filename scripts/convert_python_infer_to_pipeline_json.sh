@@ -29,6 +29,7 @@ echo "
     最后检查后处理的输出是否一致。
 8. 如果数值不一致，fix，直到数值一致。
 9. 可视化pipeline json保存的结果，和python结果做对比。
+10. 如果存在始终无法实现的operator，就把这个operator之前的所有operator用securemr operator实现保存到json.
 
 # Done（可自动验证）
 1. python ${python_code} 运行的结果，和利用pipeline inspect工具(python -m securemr.inspect.pipeline_cli)得到的结果，数值一致。
