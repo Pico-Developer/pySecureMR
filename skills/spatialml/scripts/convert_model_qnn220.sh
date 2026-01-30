@@ -34,6 +34,7 @@ convert_model() {
         custom_io_arg="-i /app/$custom_io"
     fi
 
+    # Update the docker run command in convert_model function
     case "$model_ext" in
         onnx|tflite|pb|pth|pt)
             echo "Running $model_ext model conversion inside Docker ..."

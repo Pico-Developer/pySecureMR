@@ -102,7 +102,8 @@ python3.10 -m securemr.viz.pipeline_viz <path-to-pipeline.json>
 
 ### scripts/
 
-- `scripts/convert_model.sh`: Docker-based conversion wrapper.
+- `scripts/convert_model_qnn220.sh`: Docker-based conversion wrapper, target for pico4 ultra.
+- `scripts/convert_model_qnn237.sh`: Docker-based conversion wrapper, target for next platform.
 
 ### reference/
 
