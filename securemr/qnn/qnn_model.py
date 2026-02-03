@@ -15,7 +15,7 @@
 """
 QnnModel class is used to run inference on different targets (host or android).
 
-It is very seful for checking the correctness of the model on android platform.
+It is very useful for checking the correctness of the model on android platform.
 """
 
 import json
@@ -39,30 +39,34 @@ if TORCH_INSTALLED:
 from ppadb.client import Client as AdbClient
 
 
-def get_output_node_ids(context_binary: str, QNN_SDK_ROOT: str) -> List[str]:  # noqa
+def get_output_node_ids(context_binary: str, QNN_SDK_ROOT: str, context_binary_json: str = None) -> List[str]:  # noqa
     """
     Get the output node IDs from the context binary file.
 
     Args:
         context_binary: context binary file path
         QNN_SDK_ROOT: qnn sdk path
+        context_binary_json: if provided, skip qnn-context-binary-utility
 
     Returns:
         output_ids: output index list of context binary.
         output_shapes: output shape list of context binary.
     """
-    bin_file = Path(QNN_SDK_ROOT) / "bin/x86_64-linux-clang/qnn-context-binary-utility"
-
     with tempfile.NamedTemporaryFile(suffix=".json", mode="w+") as tmp_json:
-        cmd = [
-            str(bin_file),
-            "--context_binary",
-            context_binary,
-            "--json_file",
-            tmp_json.name,
-        ]
-        subprocess.run(cmd, check=True)
-        tmp_json.seek(0)
+        if context_binary_json:
+            tmp_json = context_binary_json
+        else:
+            bin_file = Path(QNN_SDK_ROOT) / "bin/x86_64-linux-clang/qnn-context-binary-utility"
+            cmd = [
+                str(bin_file),
+                "--context_binary",
+                context_binary,
+                "--json_file",
+                tmp_json.name,
+            ]
+            subprocess.run(cmd, check=True)
+            tmp_json.seek(0)
+
         data = json.load(tmp_json)
         try:
             graph_outputs = data["info"]["graphs"][0]["info"]["graphOutputs"]
@@ -110,9 +114,11 @@ class QnnModel:
     def __init__(
         self,
         context_binary: str,
+        *,
         target: str = "host",   # "auto", "android", "host"
         output_node_ids: str = None,
         name="sampleapp_test",
+        context_binary_json: str = None,
     ):
         """
         Construct for QnnModel.
@@ -134,7 +140,7 @@ class QnnModel:
         cache_context_binary = os.path.join(self.temp_dir, os.path.basename(context_binary))
         shutil.copy(context_binary, cache_context_binary)
         self.context_binary = cache_context_binary
-        _output_node_ids, _output_shapes = get_output_node_ids(context_binary, self.QNN_SDK_ROOT)
+        _output_node_ids, _output_shapes = get_output_node_ids(context_binary, self.QNN_SDK_ROOT, context_binary_json)
         if output_node_ids is None:
             self.output_node_ids = _output_node_ids
             self.output_shapes = _output_shapes

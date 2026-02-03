@@ -36,6 +36,11 @@ Behavior:
 - `<model_name>_output/<model_name>.serialized.bin`
 - `<model_name>_output/model.json`
 
+### Tips
+
+- MUST make sure input model_file is correct. Fed with input, it can output expected result. If onnx file is converted from pt file manually, MUST check onnx output is same as pt output.
+- If input model_file is broken, the coverted serialized.bin is broken too.
+
 ## PySecureMR inspect debugging on Android(Pico)
 
 Use `pySecureMR` to sanity-check models/pipelines on device.
@@ -108,5 +113,4 @@ python3.10 -m securemr.viz.pipeline_viz <path-to-pipeline.json>
 ### reference/
 
 - `pipeline_json_spec.md`: Specification for securemr pipeline json. You should refer this if you need to dump securemr pipeline to json.
-
 - `operator_tips.md`: If you find operator is not supported in pipeline_json_spec.md, read operator_tips.md for advanced tricks to implement it.

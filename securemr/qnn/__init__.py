@@ -14,7 +14,8 @@
 """QNN-related utilities (Linux-only toolchain)."""
 
 from .qnn_model import QnnModel
+from .qnn_model_v2 import QnnModelV2
 from .onnx_to_qnn import onnx_to_qnn
 from .pytorch_to_qnn import pytorch_to_qnn
 
-__all__ = ["QnnModel", "onnx_to_qnn", "pytorch_to_qnn"]
+__all__ = ["QnnModel", "QnnModelV2", "onnx_to_qnn", "pytorch_to_qnn"]

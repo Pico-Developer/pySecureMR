@@ -15,6 +15,7 @@
 
 import os
 import shutil
+import json
 import tempfile
 from typing import List, Tuple
 
@@ -66,6 +67,8 @@ def onnx_to_qnn(
     input_shape_list = []
     input_shape_str = [] 
 
+    if not ONNX_INSTALLED:
+        raise NotImplementedError("onnx is requried.")
     model = onnx.load(onnx_file)
     multiple_input = len(model.graph.input)
     for idx, _input in enumerate(model.graph.input):
@@ -107,6 +110,24 @@ def onnx_to_qnn(
         kwargs = " ".join(qnn_context_binary_generator_kwargs)
     else:
         kwargs = qnn_context_binary_generator_kwargs
+    # Generate config for qnn237
+    if "2.37.1" in QNN_SDK_ROOT:
+        file_htp = "/tmp/HtpConfigFile.json"
+        file_perf = "/tmp/PerfSetting.json"
+        htp_config = {"backend_extensions": {
+            "shared_library_path": "libQnnHtpNetRunExtensions.so",
+            "config_file_path": file_perf
+            }}
+        perf_setting = {"devices": [{ 
+                                     "soc_model": 69,
+                                     "dsp_arch": "v79"
+                                     }]}
+        with open(file_htp, 'w') as fid:
+            json.dump(htp_config, fid, indent=2)
+        with open(file_perf, 'w') as fid:
+            json.dump(perf_setting, fid, indent=2)
+        kwargs += f" --config_file {file_htp}"
+
     if not DEBUG_QNN:
         kwargs += " 2>/dev/null"
     cmd = (
