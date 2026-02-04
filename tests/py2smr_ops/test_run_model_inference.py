@@ -8,8 +8,8 @@ from .conftest import skip_if_no_device
 
 
 MNIST_DIR = Path(__file__).resolve().parents[2] / "examples" / "mnistwild"
-MODEL_BIN = MNIST_DIR / "mnist.serialized.bin"
-MODEL_JSON = MNIST_DIR / "mnist.serialized.json"
+MODEL_BIN = MNIST_DIR / "qnn237" / "model.serialized.bin"
+MODEL_JSON = MNIST_DIR / "qnn237" / "model.serialized.json"
 
 
 def _load_model_meta():
@@ -52,8 +52,6 @@ def traced_run_model_inference(input_1):
 
 
 def test_run_model_inference_host():
-    if os.getenv("QNN_SDK_ROOT") is None:
-        pytest.skip("QNN_SDK_ROOT not set; skip model inference test")
     inputs, outputs, dims, _output_types, _name = _load_model_meta()
     assert MODEL_BIN.exists(), "MNIST serialized model is required"
     input_shape = (dims[1], dims[2], dims[3])
@@ -66,13 +64,12 @@ def test_run_model_inference_host():
 
 
 @skip_if_no_device
+@pytest.mark.skipif(True, reason="host is actually on device, skip this one.")
 def test_run_model_inference_device():
     inputs, outputs, dims, _output_types, _name = _load_model_meta()
     input_shape = (dims[1], dims[2], dims[3])
     input_tensor = np.random.rand(*input_shape).astype(np.float32)
-    prev_target = os.getenv("PY2SMR_MODEL_INFERENCE_TARGET")
-    os.environ["PY2SMR_MODEL_INFERENCE_TARGET"] = "android"
-
+    
     out_map, ctx = traced_run_model_inference.trace(input_1=input_tensor)
     spec = convert(ctx)
     expected = {outputs[0]: out_map[outputs[0]], outputs[1]: out_map[outputs[1]]}
@@ -81,7 +78,7 @@ def test_run_model_inference_device():
         {"input_1": input_tensor},
         expected_outputs=expected,
         device=True,
-        duration=60,
+        duration=10,
     )
     if verification.error_message == "Device execution failed":
         pytest.skip("pipeline_inspect produced no output files; device execution failed")

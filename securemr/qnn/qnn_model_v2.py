@@ -20,6 +20,7 @@ model_inspect APK for inference, which is useful for testing models in the
 SecureMR pipeline.
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -211,6 +212,50 @@ class QnnModelV2:
                 outputs_pulled = True
         return outputs_pulled
 
+    def _md5sum_file(self, path: Path) -> str:
+        """Compute MD5 for a local file."""
+        digest = hashlib.md5()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(8192), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _get_device_md5(self, device_path: str) -> Optional[str]:
+        """Fetch MD5 from device for the given file path."""
+        output = capture_adb(["shell", "md5sum", device_path], self.device, check=False).strip()
+        if not output or "not found" in output or "No such file" in output:
+            return None
+        return output.split()[0]
+
+    def _find_device_output_path(self, filename: str) -> Optional[str]:
+        """Locate output file on device across known output directories."""
+        for directory in self.device_output_dirs:
+            device_path = f"{directory}/{filename}"
+            listing = capture_adb(["shell", "ls", device_path], self.device, check=False).strip()
+            if listing and "No such file" not in listing:
+                return device_path
+        return None
+
+    def _check_md5sums(self, local_dir: Path) -> None:
+        """Compare local file MD5s with device MD5s."""
+        if not local_dir.exists():
+            return
+        for file_path in sorted(local_dir.glob("*.bin")):
+            device_path = self._find_device_output_path(file_path.name)
+            if not device_path:
+                print(f"Warning: could not find device file for {file_path.name}")
+                continue
+            device_md5 = self._get_device_md5(device_path)
+            if not device_md5:
+                print(f"Warning: could not read device md5 for {file_path.name}")
+                continue
+            local_md5 = self._md5sum_file(file_path)
+            if local_md5 != device_md5:
+                print(
+                    "Warning: md5 mismatch for "
+                    f"{file_path.name} (local {local_md5} != device {device_md5})"
+                )
+
     def _run_model_inspect(self, input_path: Optional[str] = None) -> Path:
         """
         Run model_inspect on the device and return the output directory.
@@ -259,6 +304,9 @@ class QnnModelV2:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         local_output_dir = Path(self.temp_dir) / f"model_inspect_outputs_{timestamp}"
         outputs_pulled = self._pull_outputs(local_output_dir)
+
+        if outputs_pulled:
+            self._check_md5sums(local_output_dir)
 
         if outputs_pulled:
             print(f"Outputs saved under {local_output_dir}")

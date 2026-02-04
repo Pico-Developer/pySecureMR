@@ -116,9 +116,10 @@ fi
 input_abs="$(realpath "$INPUT_MODEL")"
 pwd_abs="$(pwd)"
 model_name="$(basename -- "$INPUT_MODEL")"
-if [[ "$input_abs" != "$pwd_abs/$model_name" ]]; then
+model_name_safe="$(echo "$model_name" | sed 's/[^A-Za-z0-9._-]/_/g')"
+if [[ "$input_abs" != "$pwd_abs/$model_name_safe" ]]; then
     mkdir -p models
-    cp "$input_abs" "models/$model_name"
-    INPUT_MODEL="models/$model_name"
+    cp "$input_abs" "models/$model_name_safe"
+    INPUT_MODEL="models/$model_name_safe"
 fi
 convert_model "$INPUT_MODEL" "$CUSTOM_IO"

@@ -514,6 +514,7 @@ def _execute_operator(
         right, left, timestamp, cam_mat = ops_module.rectified_vst_access(
             output_shapes=output_shapes,
             output_names=output_names,
+            image_path=op_spec.get("image_path"),
         )
         if output_names:
             if len(output_names) >= 1:

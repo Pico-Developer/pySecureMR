@@ -52,10 +52,11 @@ def get_output_node_ids(context_binary: str, QNN_SDK_ROOT: str, context_binary_j
         output_ids: output index list of context binary.
         output_shapes: output shape list of context binary.
     """
-    with tempfile.NamedTemporaryFile(suffix=".json", mode="w+") as tmp_json:
-        if context_binary_json:
-            tmp_json = context_binary_json
-        else:
+    if context_binary_json:
+        with open(context_binary_json, "r", encoding="utf-8") as json_file:
+            data = json.load(json_file)
+    else:
+        with tempfile.NamedTemporaryFile(suffix=".json", mode="w+") as tmp_json:
             bin_file = Path(QNN_SDK_ROOT) / "bin/x86_64-linux-clang/qnn-context-binary-utility"
             cmd = [
                 str(bin_file),
@@ -66,14 +67,13 @@ def get_output_node_ids(context_binary: str, QNN_SDK_ROOT: str, context_binary_j
             ]
             subprocess.run(cmd, check=True)
             tmp_json.seek(0)
-
-        data = json.load(tmp_json)
-        try:
-            graph_outputs = data["info"]["graphs"][0]["info"]["graphOutputs"]
-            output_ids = [output["info"]["name"] for output in graph_outputs]
-            output_shapes = [output["info"]["dimensions"] for output in graph_outputs]
-        except KeyError as e:
-            raise RuntimeError(f"Invalid JSON structure: missing key {e}")
+            data = json.load(tmp_json)
+    try:
+        graph_outputs = data["info"]["graphs"][0]["info"]["graphOutputs"]
+        output_ids = [output["info"]["name"] for output in graph_outputs]
+        output_shapes = [output["info"]["dimensions"] for output in graph_outputs]
+    except KeyError as e:
+        raise RuntimeError(f"Invalid JSON structure: missing key {e}")
     return output_ids, output_shapes
 
 

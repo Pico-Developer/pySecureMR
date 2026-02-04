@@ -1116,21 +1116,48 @@ def uv_to_3d_in_cam_space(
 def rectified_vst_access(
     output_shapes: Optional[List[tuple]] = None,
     output_names: Optional[List[str]] = None,
+    image_path: Optional[str] = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Stub for rectified VST access.
 
     Corresponds to EOperatorType.RECTIFIED_VST_ACCESS.
     """
-    if output_shapes is None or len(output_shapes) < 4:
-        right = np.zeros((1, 1, 3), dtype=np.uint8)
-        left = np.zeros((1, 1, 3), dtype=np.uint8)
-        timestamp = np.zeros((1, 4), dtype=np.int32)
-        cam_mat = np.zeros((3, 3), dtype=np.float32)
+    right = None
+    left = None
+    if image_path:
+        try:
+            import cv2
+            img = cv2.imread(image_path)
+            if img is not None:
+                if output_shapes and len(output_shapes) >= 2:
+                    target_right = output_shapes[0]
+                    target_left = output_shapes[1]
+                    if target_right[:2] != img.shape[:2]:
+                        img = cv2.resize(img, (int(target_right[1]), int(target_right[0])))
+                right = img.copy()
+                left = img.copy()
+        except Exception:
+            right = None
+            left = None
+
+    if right is None or left is None:
+        if output_shapes is None or len(output_shapes) < 4:
+            right = np.zeros((1, 1, 3), dtype=np.uint8)
+            left = np.zeros((1, 1, 3), dtype=np.uint8)
+            timestamp = np.zeros((1, 4), dtype=np.int32)
+            cam_mat = np.zeros((3, 3), dtype=np.float32)
+        else:
+            right = np.zeros(output_shapes[0], dtype=np.uint8)
+            left = np.zeros(output_shapes[1], dtype=np.uint8)
+            timestamp = np.zeros(output_shapes[2], dtype=np.int32)
+            cam_mat = np.zeros(output_shapes[3], dtype=np.float32)
     else:
-        right = np.zeros(output_shapes[0], dtype=np.uint8)
-        left = np.zeros(output_shapes[1], dtype=np.uint8)
-        timestamp = np.zeros(output_shapes[2], dtype=np.int32)
-        cam_mat = np.zeros(output_shapes[3], dtype=np.float32)
+        if output_shapes and len(output_shapes) >= 4:
+            timestamp = np.zeros(output_shapes[2], dtype=np.int32)
+            cam_mat = np.zeros(output_shapes[3], dtype=np.float32)
+        else:
+            timestamp = np.zeros((1, 4), dtype=np.int32)
+            cam_mat = np.zeros((3, 3), dtype=np.float32)
 
     ctx = get_current_trace()
     if ctx is not None:
