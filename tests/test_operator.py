@@ -18,9 +18,7 @@ import os
 import math
 import pytest
 import securemr as smr
-from securemr.serialization import Pipeline as SerializablePipeline
-from securemr.serialization import DeserializedPipeline
-from securemr.serialization import mat_flag, convert_from_dtype
+from securemr.core.utils import mat_flag, convert_from_dtype
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
@@ -500,44 +498,3 @@ def test_sort_mat_by_column():
     sorted_mat = t_mat.numpy()[:, :, 0]
     assert (sorted_mat[:, 0] == np.sort(mat[:, 0])[::-1]).all()
     assert (sorted_mat[:, 1] == np.sort(mat[:, 1])[::-1]).all()
-
-
-def test_normalize_div255():
-    image = (np.random.randn(480, 320, 3) * 255).astype(np.uint8)
-    target_h, target_w = image.shape[:2] 
-
-    # Build serializable pipeline
-    p = SerializablePipeline()
-
-    # Create and query tensors
-    lt_img = p.query_local_tensor(p.allocate_placeholder([target_w, target_h], mat_flag(smr.EDataType.UINT8, 3), "image"))
-    lt_y2 = p.query_local_tensor(p.allocate_local_tensor([target_w, target_h], mat_flag(smr.EDataType.UINT8, 3), "letterboxed_rgb"))
-    lt_y3 = p.query_local_tensor(p.allocate_local_tensor([target_w, target_h], mat_flag(smr.EDataType.FLOAT32, 3), "letterboxed_float32"))
-    lt_y4 = p.query_local_tensor(p.allocate_local_tensor([target_w, target_h], mat_flag(smr.EDataType.FLOAT32, 3), "normalized_tensor"))
-    lt_y5 = p.query_local_tensor(p.allocate_placeholder([target_w, target_h], mat_flag(smr.EDataType.FLOAT32, 3), "model_input_tensor"))
-
-    # Operators
-    op_cvt_rgb = p.query_operator(p.allocate_operator(smr.EOperatorType.CONVERT_COLOR, [str(cv2.COLOR_BGR2RGB)]))
-    op_assign_float = p.query_operator(p.allocate_operator(smr.EOperatorType.ASSIGNMENT))
-    op_div255 = p.query_operator(p.allocate_operator(smr.EOperatorType.ARITHMETIC_COMPOSE, ["{0} / 255.0"]))
-    op_assign_out = p.query_operator(p.allocate_operator(smr.EOperatorType.ASSIGNMENT))
-
-    # Connect ops
-    op_cvt_rgb.data_as_operand(lt_img, 0)
-    op_cvt_rgb.connect_result_to_data_array(0, lt_y2)
-
-    op_assign_float.data_as_operand(lt_y2, 0)
-    op_assign_float.connect_result_to_data_array(0, lt_y3)
-
-    op_div255.data_as_operand(lt_y3, 0)
-    op_div255.connect_result_to_data_array(0, lt_y4)
-
-    op_assign_out.data_as_operand(lt_y4, 0)
-    op_assign_out.connect_result_to_data_array(0, lt_y5)
-
-    # IO
-    p.set_inputs(["image"])
-    p.set_outputs(["model_input_tensor"])  # main output
-
-    # Execute the serialized pipeline via DeserializedPipeline for parity.
-    model_input_tensor = DeserializedPipeline(p.spec)(image, timeout=3)

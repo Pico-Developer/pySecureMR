@@ -37,6 +37,11 @@ def pytest_collection_modifyitems(config, items):  # noqa: D103
     )
     for item in items:
         nodeid = str(item.nodeid)
+        # Skip tests that don't require native bindings
         if "tests/test_inspect.py" in nodeid:
+            continue
+        if "tests/test_py2smr.py" in nodeid:
+            continue
+        if "tests/py2smr_ops/" in nodeid:
             continue
         item.add_marker(skip_bindings)

@@ -40,7 +40,11 @@ __all__ = [
     "qnn_dtype_to_smr",
     "ensure_tensor_dimensions",
     "TensorType",
+    "type_to_name",
 ]
+
+_OP_ENUM_PREFIX = "XR_SECURE_MR_OPERATOR_TYPE_"
+_OP_ENUM_SUFFIX = "_PICO"
 
 
 def run(cmd) -> None:
@@ -225,3 +229,32 @@ def ensure_tensor_dimensions(spatial_dims: Sequence[int]) -> list[int]:
     if len(dims) == 1:
         return [dims[0], 1]
     return dims
+
+
+def type_to_name(op_type) -> str:
+    """Return the canonical JSON `type` token for a SecureMR operator."""
+    try:
+        from .. import EOperatorType
+    except ImportError:
+        EOperatorType = None
+
+    try:
+        key_val = int(op_type)
+    except Exception:
+        key_val = int(op_type)
+
+    value_to_name: Dict[int, str] = {}
+    if EOperatorType is not None:
+        for attr in dir(EOperatorType):
+            if attr.startswith("__"):
+                continue
+            try:
+                value_to_name[int(getattr(EOperatorType, attr))] = attr
+            except Exception:
+                continue
+
+    enum_name = value_to_name.get(key_val)
+    if not enum_name:
+        return f"unknown_{key_val}"
+
+    return f"{_OP_ENUM_PREFIX}{enum_name}{_OP_ENUM_SUFFIX}"

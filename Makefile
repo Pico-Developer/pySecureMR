@@ -46,3 +46,10 @@ upload:
 
 clean:
 	@rm -rf dist build *.egg-info
+
+log:
+	adb logcat -c | adb logcat | grep -e "PipelineInspect:"
+log2:
+	adb logcat -c | adb logcat | grep -e "testbench:"
+log3:
+	adb logcat -c | adb logcat | grep -e 'Open MR::Server:' -e 'Secure MR::Server:' -e 'SECURE MR::Backend' -e "Secure MR::DepthApi"

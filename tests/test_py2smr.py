@@ -1,0 +1,520 @@
+#!/usr/bin/env python3
+# Copyright (c) 2025 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Unit tests for py2smr module."""
+
+import json
+import os
+import tempfile
+
+import numpy as np
+import pytest
+
+from securemr.py2smr import trace, ops, convert, verify
+from securemr.py2smr.tracer import TraceContext, TracedOp, TensorInfo, get_current_trace
+from securemr.py2smr.converter import trace_to_pipeline_spec
+from securemr.py2smr.verifier import compare_outputs, VerificationResult
+from securemr.core.types import EOperatorType
+
+
+class TestTracer:
+    """Tests for the tracer module."""
+
+    def test_trace_decorator_basic(self):
+        """Test basic trace decorator functionality."""
+        @trace(inputs=["x"], outputs=["y"])
+        def simple_func(x):
+            return ops.arithmetic(x, "{0} * 2.0")
+
+        input_arr = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        result, ctx = simple_func.trace(x=input_arr)
+
+        assert isinstance(ctx, TraceContext)
+        assert len(ctx.operations) == 1
+        assert ctx.operations[0].op_type == EOperatorType.ARITHMETIC_COMPOSE
+        assert "x" in ctx.tensors
+        assert ctx.tensors["x"].is_input
+
+    def test_trace_multiple_ops(self):
+        """Test tracing multiple operations."""
+        @trace(inputs=["image"], outputs=["result"])
+        def preprocess(image):
+            normalized = ops.arithmetic(image, "{0} / 255.0")
+            scaled = ops.arithmetic(normalized, "{0} * 2.0 - 1.0")
+            return scaled
+
+        input_arr = np.random.randint(0, 255, (4, 4, 3), dtype=np.uint8)
+        result, ctx = preprocess.trace(image=input_arr)
+
+        assert len(ctx.operations) == 2
+        assert ctx.operations[0].attrs == ["{0} / 255.0"]
+        assert ctx.operations[1].attrs == ["{0} * 2.0 - 1.0"]
+
+    def test_trace_multiple_outputs(self):
+        """Test tracing function with multiple outputs."""
+        @trace(inputs=["x"], outputs=["min_val", "max_val"])
+        def minmax(x):
+            min_val = ops.arithmetic(x, "{0} - 1.0")
+            max_val = ops.arithmetic(x, "{0} + 1.0")
+            return min_val, max_val
+
+        input_arr = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        (min_result, max_result), ctx = minmax.trace(x=input_arr)
+
+        assert "min_val" in ctx.tensors
+        assert "max_val" in ctx.tensors
+        assert ctx.tensors["min_val"].is_output
+        assert ctx.tensors["max_val"].is_output
+
+    def test_trace_context_not_active_outside(self):
+        """Test that trace context is not active outside traced function."""
+        assert get_current_trace() is None
+
+    def test_missing_input_raises_error(self):
+        """Test that missing input raises ValueError."""
+        @trace(inputs=["x", "y"], outputs=["z"])
+        def add_func(x, y):
+            return ops.arithmetic(x, "{0} + 1.0")
+
+        with pytest.raises(ValueError, match="Missing required input"):
+            add_func.trace(x=np.array([1.0]))
+
+    def test_non_array_input_raises_error(self):
+        """Test that non-array input raises TypeError."""
+        @trace(inputs=["x"], outputs=["y"])
+        def simple_func(x):
+            return ops.arithmetic(x, "{0} * 2.0")
+
+        with pytest.raises(TypeError, match="must be a numpy array"):
+            simple_func.trace(x=[1.0, 2.0])
+
+
+class TestOps:
+    """Tests for the ops module."""
+
+    def test_arithmetic_basic(self):
+        """Test basic arithmetic operation."""
+        input_arr = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        result = ops.arithmetic(input_arr, "{0} * 2.0")
+
+        expected = input_arr * 2.0
+        np.testing.assert_allclose(result, expected)
+
+    def test_arithmetic_complex_expression(self):
+        """Test arithmetic with complex expression."""
+        input_arr = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        result = ops.arithmetic(input_arr, "{0} / 255.0 * 2.0 - 1.0")
+
+        expected = input_arr / 255.0 * 2.0 - 1.0
+        np.testing.assert_allclose(result, expected)
+
+    def test_elementwise_min(self):
+        """Test elementwise minimum."""
+        a = np.array([[1.0, 5.0], [3.0, 2.0]], dtype=np.float32)
+        b = np.array([[2.0, 3.0], [4.0, 1.0]], dtype=np.float32)
+        result = ops.elementwise_min(a, b)
+
+        expected = np.minimum(a, b)
+        np.testing.assert_allclose(result, expected)
+
+    def test_elementwise_max(self):
+        """Test elementwise maximum."""
+        a = np.array([[1.0, 5.0], [3.0, 2.0]], dtype=np.float32)
+        b = np.array([[2.0, 3.0], [4.0, 1.0]], dtype=np.float32)
+        result = ops.elementwise_max(a, b)
+
+        expected = np.maximum(a, b)
+        np.testing.assert_allclose(result, expected)
+
+    def test_elementwise_multiply(self):
+        """Test elementwise multiplication."""
+        a = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        b = np.array([[2.0, 3.0], [4.0, 5.0]], dtype=np.float32)
+        result = ops.elementwise_multiply(a, b)
+
+        expected = a * b
+        np.testing.assert_allclose(result, expected)
+
+    def test_normalize(self):
+        """Test L2 normalization."""
+        input_arr = np.array([[3.0, 4.0], [1.0, 0.0]], dtype=np.float32)
+        result = ops.normalize(input_arr)
+
+        # First row: [3, 4] -> norm = 5 -> [0.6, 0.8]
+        # Second row: [1, 0] -> norm = 1 -> [1.0, 0.0]
+        expected = np.array([[0.6, 0.8], [1.0, 0.0]], dtype=np.float32)
+        np.testing.assert_allclose(result, expected, rtol=1e-5)
+
+    def test_argmax(self):
+        """Test argmax operation."""
+        input_arr = np.array([[1.0, 3.0, 2.0], [5.0, 1.0, 4.0]], dtype=np.float32)
+        result = ops.argmax(input_arr, axis=-1)
+
+        expected = np.array([1, 0], dtype=np.int32)
+        np.testing.assert_array_equal(result, expected)
+
+    def test_nms_basic(self):
+        """Test basic NMS operation."""
+        boxes = np.array([
+            [0, 0, 10, 10],
+            [1, 1, 11, 11],  # High overlap with first
+            [50, 50, 60, 60],  # No overlap
+        ], dtype=np.float32)
+        scores = np.array([0.9, 0.8, 0.7], dtype=np.float32)
+
+        result = ops.nms(boxes, scores, threshold=0.5)
+
+        # Should keep first and third (second overlaps too much with first)
+        assert 0 in result
+        assert 2 in result
+
+    def test_nms_empty(self):
+        """Test NMS with empty input."""
+        boxes = np.array([], dtype=np.float32).reshape(0, 4)
+        scores = np.array([], dtype=np.float32)
+
+        result = ops.nms(boxes, scores, threshold=0.5)
+        assert len(result) == 0
+
+    def test_ops_record_to_trace(self):
+        """Test that ops record to trace context."""
+        @trace(inputs=["x"], outputs=["y"])
+        def traced_func(x):
+            return ops.arithmetic(x, "{0} + 1.0")
+
+        input_arr = np.array([[1.0, 2.0]], dtype=np.float32)
+        _, ctx = traced_func.trace(x=input_arr)
+
+        assert len(ctx.operations) == 1
+        op = ctx.operations[0]
+        assert op.op_type == EOperatorType.ARITHMETIC_COMPOSE
+        assert op.attrs == ["{0} + 1.0"]
+
+
+class TestConverter:
+    """Tests for the converter module."""
+
+    def test_convert_basic(self):
+        """Test basic conversion to pipeline spec."""
+        @trace(inputs=["input"], outputs=["output"])
+        def simple_func(input):
+            return ops.arithmetic(input, "{0} + 2.0")
+
+        input_arr = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        _, ctx = simple_func.trace(input=input_arr)
+
+        spec = trace_to_pipeline_spec(ctx)
+
+        assert "metadata" in spec
+        assert "tensors" in spec
+        assert "operators" in spec
+        assert "inputs" in spec
+        assert "outputs" in spec
+
+        assert "input" in spec["inputs"]
+        assert "output" in spec["outputs"]
+        assert len(spec["operators"]) == 1
+
+    def test_convert_saves_to_file(self):
+        """Test that convert saves to file."""
+        @trace(inputs=["x"], outputs=["y"])
+        def simple_func(x):
+            return ops.arithmetic(x, "{0} * 2.0")
+
+        input_arr = np.array([[1.0, 2.0]], dtype=np.float32)
+        _, ctx = simple_func.trace(x=input_arr)
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            output_path = f.name
+
+        try:
+            spec = convert(ctx, output=output_path)
+
+            assert os.path.exists(output_path)
+            with open(output_path, "r") as f:
+                loaded_spec = json.load(f)
+
+            assert loaded_spec == spec
+        finally:
+            os.unlink(output_path)
+
+    def test_convert_tensor_shapes(self):
+        """Test that tensor shapes are correctly converted."""
+        @trace(inputs=["image"], outputs=["result"])
+        def process_image(image):
+            return ops.arithmetic(image, "{0} / 255.0")
+
+        # 3D tensor (H, W, C)
+        input_arr = np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8)
+        _, ctx = process_image.trace(image=input_arr)
+
+        spec = trace_to_pipeline_spec(ctx)
+
+        # Check input tensor spec
+        input_spec = spec["tensors"]["image"]
+        assert input_spec["dimensions"] == [224, 224]  # W, H
+        assert input_spec["channels"] == 3
+
+    def test_convert_operator_attrs(self):
+        """Test that operator attributes are correctly converted."""
+        @trace(inputs=["x"], outputs=["y"])
+        def func(x):
+            return ops.arithmetic(x, "{0} / 255.0 * 2.0 - 1.0")
+
+        input_arr = np.array([[1.0]], dtype=np.float32)
+        _, ctx = func.trace(x=input_arr)
+
+        spec = trace_to_pipeline_spec(ctx)
+
+        op_spec = spec["operators"][0]
+        assert op_spec["expression"] == "{0} / 255.0 * 2.0 - 1.0"
+
+
+class TestVerifier:
+    """Tests for the verifier module."""
+
+    def test_compare_outputs_success(self):
+        """Test successful output comparison."""
+        expected = {"out": np.array([1.0, 2.0, 3.0], dtype=np.float32)}
+        actual = {"out": np.array([1.0, 2.0, 3.0], dtype=np.float32)}
+
+        result = compare_outputs(expected, actual)
+
+        assert result.success
+        assert result.error_message is None
+
+    def test_compare_outputs_within_tolerance(self):
+        """Test comparison within tolerance."""
+        expected = {"out": np.array([1.0, 2.0, 3.0], dtype=np.float32)}
+        actual = {"out": np.array([1.0001, 2.0001, 3.0001], dtype=np.float32)}
+
+        result = compare_outputs(expected, actual, rtol=1e-3, atol=1e-3)
+
+        assert result.success
+
+    def test_compare_outputs_failure(self):
+        """Test failed output comparison."""
+        expected = {"out": np.array([1.0, 2.0, 3.0], dtype=np.float32)}
+        actual = {"out": np.array([1.0, 2.0, 5.0], dtype=np.float32)}
+
+        result = compare_outputs(expected, actual, rtol=1e-4, atol=1e-4)
+
+        assert not result.success
+        assert result.error_message is not None
+        assert "out" in result.error_message
+
+    def test_compare_outputs_missing_key(self):
+        """Test comparison with missing output key."""
+        expected = {"out1": np.array([1.0]), "out2": np.array([2.0])}
+        actual = {"out1": np.array([1.0])}
+
+        result = compare_outputs(expected, actual)
+
+        assert not result.success
+        assert "Missing output" in result.error_message
+
+    def test_compare_outputs_shape_mismatch(self):
+        """Test comparison with shape mismatch."""
+        expected = {"out": np.array([1.0, 2.0, 3.0])}
+        actual = {"out": np.array([1.0, 2.0])}
+
+        result = compare_outputs(expected, actual)
+
+        assert not result.success
+        assert "Shape mismatch" in result.error_message
+
+
+class TestIntegration:
+    """Integration tests for the full py2smr workflow."""
+
+    def test_full_workflow_arithmetic(self):
+        """Test full workflow with arithmetic operations."""
+        @trace(inputs=["input"], outputs=["output"])
+        def normalize_image(input):
+            return ops.arithmetic(input, "{0} / 255.0")
+
+        # Create test input
+        input_arr = np.array([[100, 200], [50, 150]], dtype=np.uint8)
+
+        # Trace execution
+        result, ctx = normalize_image.trace(input=input_arr)
+
+        # Convert to pipeline spec
+        spec = convert(ctx)
+
+        # Verify spec structure
+        assert spec["inputs"] == ["input"]
+        assert spec["outputs"] == ["output"]
+        assert len(spec["operators"]) == 1
+        assert spec["operators"][0]["expression"] == "{0} / 255.0"
+
+        # Verify result
+        expected = input_arr.astype(np.float32) / 255.0
+        np.testing.assert_allclose(result, expected)
+
+    def test_full_workflow_multiple_ops(self):
+        """Test full workflow with multiple operations."""
+        @trace(inputs=["image"], outputs=["processed"])
+        def preprocess(image):
+            # Normalize to [0, 1]
+            normalized = ops.arithmetic(image, "{0} / 255.0")
+            # Scale to [-1, 1]
+            scaled = ops.arithmetic(normalized, "{0} * 2.0 - 1.0")
+            return scaled
+
+        input_arr = np.random.randint(0, 255, (4, 4, 3), dtype=np.uint8)
+        result, ctx = preprocess.trace(image=input_arr)
+
+        spec = convert(ctx)
+
+        assert len(spec["operators"]) == 2
+        assert spec["operators"][0]["expression"] == "{0} / 255.0"
+        assert spec["operators"][1]["expression"] == "{0} * 2.0 - 1.0"
+
+        # Verify result
+        expected = input_arr.astype(np.float32) / 255.0 * 2.0 - 1.0
+        np.testing.assert_allclose(result, expected)
+
+    def test_full_workflow_elementwise_ops(self):
+        """Test full workflow with elementwise operations."""
+        @trace(inputs=["a", "b"], outputs=["result"])
+        def clamp(a, b):
+            min_val = ops.elementwise_min(a, b)
+            max_val = ops.elementwise_max(a, b)
+            return ops.elementwise_multiply(min_val, max_val)
+
+        a = np.array([[1.0, 5.0], [3.0, 2.0]], dtype=np.float32)
+        b = np.array([[2.0, 3.0], [4.0, 1.0]], dtype=np.float32)
+
+        result, ctx = clamp.trace(a=a, b=b)
+
+        spec = convert(ctx)
+
+        assert len(spec["operators"]) == 3
+        assert "a" in spec["inputs"]
+        assert "b" in spec["inputs"]
+
+    def test_save_and_load_pipeline(self):
+        """Test saving and loading pipeline JSON."""
+        @trace(inputs=["x"], outputs=["y"])
+        def double(x):
+            return ops.arithmetic(x, "{0} * 2.0")
+
+        input_arr = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        _, ctx = double.trace(x=input_arr)
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            output_path = f.name
+
+        try:
+            convert(ctx, output=output_path)
+
+            with open(output_path, "r") as f:
+                loaded_spec = json.load(f)
+
+            # Verify loaded spec is valid
+            assert "metadata" in loaded_spec
+            assert "tensors" in loaded_spec
+            assert "operators" in loaded_spec
+            assert loaded_spec["inputs"] == ["x"]
+            assert loaded_spec["outputs"] == ["y"]
+        finally:
+            os.unlink(output_path)
+
+
+class TestPythonExecutor:
+    """Tests for the pure Python pipeline executor."""
+
+    def test_run_pipeline_python_basic(self):
+        """Test basic pipeline execution with pure Python."""
+        from securemr.py2smr.verifier import run_pipeline_python
+
+        spec = {
+            "metadata": {"version": 1},
+            "tensors": {
+                "input": {"dimensions": [2, 2], "channels": 1, "data_type": 6},
+                "output": {"dimensions": [2, 2], "channels": 1, "data_type": 6},
+            },
+            "operators": [
+                {
+                    "type": "XR_SECURE_MR_OPERATOR_TYPE_ARITHMETIC_COMPOSE_PICO",
+                    "inputs": ["input"],
+                    "outputs": ["output"],
+                    "expression": "{0} * 2.0",
+                }
+            ],
+            "inputs": ["input"],
+            "outputs": ["output"],
+        }
+
+        input_arr = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        outputs = run_pipeline_python(spec, {"input": input_arr})
+
+        expected = input_arr * 2.0
+        np.testing.assert_allclose(outputs["output"], expected)
+
+    def test_run_pipeline_python_multiple_ops(self):
+        """Test pipeline with multiple operators."""
+        from securemr.py2smr.verifier import run_pipeline_python
+
+        spec = {
+            "metadata": {"version": 1},
+            "tensors": {
+                "input": {"dimensions": [2, 2], "channels": 1, "data_type": 6},
+                "temp": {"dimensions": [2, 2], "channels": 1, "data_type": 6},
+                "output": {"dimensions": [2, 2], "channels": 1, "data_type": 6},
+            },
+            "operators": [
+                {
+                    "type": "XR_SECURE_MR_OPERATOR_TYPE_ARITHMETIC_COMPOSE_PICO",
+                    "inputs": ["input"],
+                    "outputs": ["temp"],
+                    "expression": "{0} / 255.0",
+                },
+                {
+                    "type": "XR_SECURE_MR_OPERATOR_TYPE_ARITHMETIC_COMPOSE_PICO",
+                    "inputs": ["temp"],
+                    "outputs": ["output"],
+                    "expression": "{0} * 2.0 - 1.0",
+                },
+            ],
+            "inputs": ["input"],
+            "outputs": ["output"],
+        }
+
+        input_arr = np.array([[100.0, 200.0], [50.0, 150.0]], dtype=np.float32)
+        outputs = run_pipeline_python(spec, {"input": input_arr})
+
+        expected = input_arr / 255.0 * 2.0 - 1.0
+        np.testing.assert_allclose(outputs["output"], expected)
+
+    def test_verify_with_python_executor(self):
+        """Test verify function uses pure Python executor."""
+        @trace(inputs=["x"], outputs=["y"])
+        def double(x):
+            return ops.arithmetic(x, "{0} * 2.0")
+
+        input_arr = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        result, ctx = double.trace(x=input_arr)
+
+        spec = convert(ctx)
+
+        # Verify should work without native bindings
+        verification = verify(
+            pipeline=spec,
+            inputs={"x": input_arr},
+            expected_outputs={"y": result},
+        )
+
+        assert verification.success

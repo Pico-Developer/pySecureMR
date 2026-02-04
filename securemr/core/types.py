@@ -87,7 +87,6 @@ except Exception:  # noqa: BLE001
         NORM = 35
         SWAP_HWC_CHW = 36
         JAVASCRIPT = 39
-        PYTHON_CUSTOM = 1000
 
 
 __all__ = ["BaseType", "EDataType", "EOperatorType", "BINDINGS_AVAILABLE"]

@@ -23,8 +23,7 @@ from typing import Dict, List, Sequence
 
 import securemr as smr
 
-from ..serialization import type_to_name
-from ..core.utils import convert_from_dtype, ensure_tensor_dimensions, mat_flag, qnn_dtype_to_smr
+from ..core.utils import convert_from_dtype, ensure_tensor_dimensions, mat_flag, qnn_dtype_to_smr, type_to_name
 
 
 @dataclass
