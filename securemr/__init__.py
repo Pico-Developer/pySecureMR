@@ -132,6 +132,20 @@ def __getattr__(name: str):  # noqa: D401
         from .core.utils import TORCH_INSTALLED as _ti
 
         return _ti
+    if name in {
+        "ModelPackageSpec",
+        "PipelinePackageEntry",
+        "PipelineZooPackageSpec",
+        "SUPPORTED_EXECUTION_MODES",
+        "configure_litert_inference_operator",
+        "create_litert_model_json",
+        "load_pipeline_zoo_manifest",
+        "validate_pipeline_zoo_manifest",
+        "write_pipeline_zoo_package",
+    }:
+        from . import pipeline_zoo as _pipeline_zoo
+
+        return getattr(_pipeline_zoo, name)
     raise AttributeError(f"module {__name__} has no attribute {name}")
 
 __version__ = "0.0.1"
@@ -174,4 +188,13 @@ __all__ = [
     "TensorTimestampInt32",
     "HAS_BINDINGS",
     "TORCH_INSTALLED",
+    "ModelPackageSpec",
+    "PipelinePackageEntry",
+    "PipelineZooPackageSpec",
+    "SUPPORTED_EXECUTION_MODES",
+    "configure_litert_inference_operator",
+    "create_litert_model_json",
+    "load_pipeline_zoo_manifest",
+    "validate_pipeline_zoo_manifest",
+    "write_pipeline_zoo_package",
 ]

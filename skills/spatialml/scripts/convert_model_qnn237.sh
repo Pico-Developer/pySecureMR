@@ -1,5 +1,7 @@
 #!/bin/bash
 
+echo "WARNING: convert_model_qnn237.sh is deprecated for new SpatialML Pipeline Zoo packages. Prefer LiteRT/TFLite package generation with securemr.pipeline_zoo; this script remains for legacy QNN context-binary workflows." >&2
+
 # Function to check if Docker is running
 docker_running() {
     docker info >/dev/null 2>&1

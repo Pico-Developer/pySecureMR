@@ -17,6 +17,7 @@ import os
 import shutil
 import json
 import tempfile
+import warnings
 from typing import List, Tuple
 
 from ..generate_info import main as generate_info_main
@@ -47,6 +48,13 @@ def onnx_to_qnn(
     Returns:
         Path to the converted model.
     """
+    warnings.warn(
+        "securemr.qnn.onnx_to_qnn is deprecated for new SpatialML Pipeline Zoo packages. "
+        "Prefer LiteRT/TFLite package generation with securemr.pipeline_zoo; QNN conversion is kept only "
+        "for legacy context-binary workflows.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     QNN_SDK_ROOT = os.getenv("QNN_SDK_ROOT", None)  # noqa
     if not QNN_SDK_ROOT:
         raise RuntimeError("QNN_SDK_ROOT not found. Please source qnn environment or install qnn first.")

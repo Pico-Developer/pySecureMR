@@ -86,7 +86,12 @@ except Exception:  # noqa: BLE001
         SVD = 34
         NORM = 35
         SWAP_HWC_CHW = 36
+        SCENEGRAPH_VISIBILITY = 37
+        UPDATE_COMPONENT = 38
         JAVASCRIPT = 39
+        MICROPHONE = 40
+        SPEAKER = 41
+        DEPTH = 42
 
 
 __all__ = ["BaseType", "EDataType", "EOperatorType", "BINDINGS_AVAILABLE"]

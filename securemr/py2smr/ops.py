@@ -67,6 +67,11 @@ __all__ = [
     "switch_gltf_render_status",
     "update_gltf",
     "render_text",
+    "scenegraph_visibility",
+    "update_component",
+    "microphone",
+    "speaker",
+    "depth",
     "javascript",
     "unknown",
 ]
@@ -1181,6 +1186,12 @@ def run_model_inference(
     output_dtypes: Optional[List[np.dtype]] = None,
     input_aliasing: Optional[Dict[str, str]] = None,
     output_aliasing: Optional[Dict[str, str]] = None,
+    model_type: str = "qnn",
+    model: Optional[Union[str, Dict[str, Any]]] = None,
+    model_id: Optional[str] = None,
+    model_target: str = "npu",
+    cpu_target_num_threads: int = 1,
+    model_asset: Optional[str] = None,
     duration: int = 20,
 ) -> Dict[str, np.ndarray]:
     """Run a model inference using QnnModelV2 on Android device.
@@ -1196,6 +1207,12 @@ def run_model_inference(
         output_dtypes: Optional list of output dtypes.
         input_aliasing: Optional input name aliasing.
         output_aliasing: Optional output name aliasing.
+        model_type: Serialized model runtime type. Use ``litert`` for Pipeline Zoo packages.
+        model: Optional manifest model id or inline model spec to serialize on the operator.
+        model_id: Optional explicit manifest model id to serialize on the operator.
+        model_target: Serialized backend target for Pipeline Zoo packages.
+        cpu_target_num_threads: Serialized CPU thread count when ``model_target`` is CPU.
+        model_asset: Optional package-relative model asset path for serialized pipeline specs.
         duration: Time to wait for model_inspect APK to complete (seconds).
 
     Returns:
@@ -1300,10 +1317,19 @@ def run_model_inference(
             "model_file": model_file,
             "model_file_host": model_file,
             "model_name": model_name,
+            "model_type": model_type,
+            "model_target": model_target,
+            "cpu_target_num_threads": int(cpu_target_num_threads),
             "input_aliasing": input_aliasing or {},
             "output_aliasing": output_aliasing or {},
             "output_names": output_names,
         }
+        if model is not None:
+            extra_info["model"] = model
+        if model_id is not None:
+            extra_info["model_id"] = model_id
+        if model_asset:
+            extra_info["model_asset"] = model_asset
         if device_model_file:
             extra_info["device_model_file"] = device_model_file
         if output_shapes:
@@ -1420,6 +1446,115 @@ def render_text(
             inputs=[gltf_placeholder],
             outputs=[],
         )
+
+
+def scenegraph_visibility(
+    scenegraph: np.ndarray,
+    visible: bool = True,
+    output_name: Optional[str] = None,
+) -> np.ndarray:
+    """Stub for scenegraph visibility updates.
+
+    Corresponds to EOperatorType.SCENEGRAPH_VISIBILITY.
+    """
+    _ = scenegraph
+    result = np.array([1 if visible else 0], dtype=np.uint8)
+
+    ctx = get_current_trace()
+    if ctx is not None:
+        ctx.record_op(
+            op_type=EOperatorType.SCENEGRAPH_VISIBILITY,
+            attrs=["true" if visible else "false"],
+            inputs=[scenegraph],
+            outputs=[result],
+            output_names=[output_name] if output_name else None,
+        )
+
+    return result
+
+
+def update_component(
+    component: np.ndarray,
+    update_type: str = "",
+    output_name: Optional[str] = None,
+) -> np.ndarray:
+    """Stub for component updates.
+
+    Corresponds to EOperatorType.UPDATE_COMPONENT.
+    """
+    result = np.asarray(component).copy()
+
+    ctx = get_current_trace()
+    if ctx is not None:
+        ctx.record_op(
+            op_type=EOperatorType.UPDATE_COMPONENT,
+            attrs=[update_type] if update_type else [],
+            inputs=[component],
+            outputs=[result],
+            output_names=[output_name] if output_name else None,
+        )
+
+    return result
+
+
+def microphone(output_shape: tuple = (1,), output_name: Optional[str] = None) -> np.ndarray:
+    """Stub for microphone capture.
+
+    Corresponds to EOperatorType.MICROPHONE.
+    """
+    result = np.zeros(output_shape, dtype=np.float32)
+
+    ctx = get_current_trace()
+    if ctx is not None:
+        ctx.record_op(
+            op_type=EOperatorType.MICROPHONE,
+            attrs=[],
+            inputs=[],
+            outputs=[result],
+            output_names=[output_name] if output_name else None,
+        )
+
+    return result
+
+
+def speaker(audio: np.ndarray, output_name: Optional[str] = None) -> np.ndarray:
+    """Stub for speaker playback.
+
+    Corresponds to EOperatorType.SPEAKER.
+    """
+    result = np.array([0], dtype=np.uint8)
+
+    ctx = get_current_trace()
+    if ctx is not None:
+        ctx.record_op(
+            op_type=EOperatorType.SPEAKER,
+            attrs=[],
+            inputs=[audio],
+            outputs=[result],
+            output_names=[output_name] if output_name else None,
+        )
+
+    return result
+
+
+def depth(output_shape: tuple = (1, 1), output_name: Optional[str] = None) -> np.ndarray:
+    """Stub for depth capture.
+
+    Corresponds to EOperatorType.DEPTH.
+    """
+    result = np.zeros(output_shape, dtype=np.float32)
+
+    ctx = get_current_trace()
+    if ctx is not None:
+        ctx.record_op(
+            op_type=EOperatorType.DEPTH,
+            attrs=[],
+            inputs=[],
+            outputs=[result],
+            output_names=[output_name] if output_name else None,
+        )
+
+    return result
 
 
 class _JsArray:

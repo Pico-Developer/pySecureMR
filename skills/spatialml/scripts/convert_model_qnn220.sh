@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+echo "WARNING: convert_model_qnn220.sh is deprecated for new SpatialML Pipeline Zoo packages. Prefer LiteRT/TFLite package generation with securemr.pipeline_zoo; this script remains for legacy QNN context-binary workflows." >&2
+
 # Check if Docker is running
 check_docker() {
     docker info >/dev/null 2>&1

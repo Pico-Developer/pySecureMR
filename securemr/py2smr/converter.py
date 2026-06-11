@@ -148,7 +148,19 @@ def _op_to_spec(op: TracedOp) -> Dict[str, Any]:
     elif _OP_UPDATE_GLTF is not None and op.op_type == _OP_UPDATE_GLTF and op.attrs:
         spec["update_type"] = op.attrs[0]
     elif _OP_RUN_MODEL_INFERENCE is not None and op.op_type == _OP_RUN_MODEL_INFERENCE:
-        if "device_model_file" in op.extra_info:
+        if "model_type" in op.extra_info:
+            spec["model_type"] = op.extra_info["model_type"]
+        if "model_target" in op.extra_info:
+            spec["model_target"] = op.extra_info["model_target"]
+        if "cpu_target_num_threads" in op.extra_info:
+            spec["cpu_target_num_threads"] = op.extra_info["cpu_target_num_threads"]
+        if "model" in op.extra_info:
+            spec["model"] = op.extra_info["model"]
+        if "model_id" in op.extra_info:
+            spec["model_id"] = op.extra_info["model_id"]
+        if "model_asset" in op.extra_info:
+            spec["model_asset"] = op.extra_info["model_asset"]
+        elif "device_model_file" in op.extra_info:
             spec["model_file"] = op.extra_info["device_model_file"]
         elif "model_file" in op.extra_info:
             spec["model_file"] = op.extra_info["model_file"]
