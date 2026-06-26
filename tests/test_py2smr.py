@@ -24,7 +24,12 @@ import pytest
 from securemr.py2smr import trace, ops, convert, verify
 from securemr.py2smr.tracer import TraceContext, TracedOp, TensorInfo, get_current_trace
 from securemr.py2smr.converter import trace_to_pipeline_spec
-from securemr.py2smr.verifier import compare_outputs, VerificationResult
+from securemr.py2smr.verifier import (
+    compare_outputs,
+    VerificationResult,
+    run_pipeline_python,
+    validate_pipeline_spec,
+)
 from securemr.core.types import EOperatorType
 
 
@@ -283,6 +288,111 @@ class TestConverter:
 
 class TestVerifier:
     """Tests for the verifier module."""
+
+    def test_validate_pipeline_spec_accepts_2d_matrix_tensor(self):
+        """Test that MAT tensors can be declared as row/column matrices."""
+        spec = {
+            "tensors": {
+                "row_vec": {
+                    "dimensions": [1, 4],
+                    "channels": 1,
+                    "usage": 6,
+                },
+                "named_matrix": {
+                    "dimensions": [4, 1],
+                    "channels": 1,
+                    "tensor_type": "matrix",
+                },
+            }
+        }
+
+        validate_pipeline_spec(spec)
+
+    @pytest.mark.parametrize("dimensions", [[], [4]])
+    def test_validate_pipeline_spec_rejects_1d_matrix_tensor(self, dimensions):
+        """Test that matrix/MAT tensors require at least two dimensions."""
+        spec = {
+            "tensors": {
+                "bad_vec": {
+                    "dimensions": dimensions,
+                    "channels": 1,
+                    "usage": 6,
+                }
+            }
+        }
+
+        with pytest.raises(ValueError, match="matrix tensors must have at least 2 dimensions"):
+            validate_pipeline_spec(spec)
+
+    def test_run_pipeline_python_rejects_invalid_matrix_tensor(self):
+        """Test host verification catches invalid JSON before native runtime."""
+        spec = {
+            "tensors": {
+                "bad_vec": {
+                    "dimensions": [4],
+                    "channels": 1,
+                    "usage": 6,
+                }
+            },
+            "operators": [],
+            "outputs": [],
+        }
+
+        with pytest.raises(ValueError, match="Tensor 'bad_vec'.*matrix tensors"):
+            run_pipeline_python(spec, {})
+
+    def test_validate_pipeline_spec_rejects_bad_swap_hwc_chw_shape(self):
+        """Test swap_hwc_chw rejects 4D CHW tensor declarations."""
+        spec = {
+            "tensors": {
+                "image_hwc": {
+                    "dimensions": [1024, 768],
+                    "channels": 3,
+                    "usage": 6,
+                },
+                "bad_chw": {
+                    "dimensions": [1, 3, 1024, 768],
+                    "channels": 1,
+                    "usage": 6,
+                },
+            },
+            "operators": [
+                {
+                    "type": "swap_hwc_chw",
+                    "inputs": ["image_hwc"],
+                    "outputs": ["bad_chw"],
+                }
+            ],
+        }
+
+        with pytest.raises(ValueError, match="swap_hwc_chw output 'bad_chw'"):
+            validate_pipeline_spec(spec)
+
+    def test_validate_pipeline_spec_accepts_swap_hwc_chw_shape(self):
+        """Test swap_hwc_chw accepts SecureMR channelized CHW tensor declarations."""
+        spec = {
+            "tensors": {
+                "image_hwc": {
+                    "dimensions": [1024, 768],
+                    "channels": 3,
+                    "usage": 6,
+                },
+                "image_chw": {
+                    "dimensions": [3, 1024],
+                    "channels": 768,
+                    "usage": 6,
+                },
+            },
+            "operators": [
+                {
+                    "type": "swap_hwc_chw",
+                    "inputs": ["image_hwc"],
+                    "outputs": ["image_chw"],
+                }
+            ],
+        }
+
+        validate_pipeline_spec(spec)
 
     def test_compare_outputs_success(self):
         """Test successful output comparison."""

@@ -62,6 +62,8 @@ Every tensor entry under `tensors` is an object with the following fields (`secu
 | `data` / `value` | array\<number> (optional) | Flattened tensor contents for preload. `data` and `value` are synonyms (`SecureMR_Samples/base/securemr_utils/serialization.cpp:340-414`). |
 | `is_gltf`      | bool (optional)      | Marks GLTF placeholders that skip numeric attributes (`serialization.cpp:483-488`). |
 
+Rule: tensors declared with MAT/matrix usage (`usage: 6`, `usage: "matrix"`, or `tensor_type: "matrix"`) must have at least two entries in `dimensions`. Use `[1, N]` or `[N, 1]` for vector-shaped matrix data; use scalar/point tensor usage for true one-dimensional scalar or point arrays.
+
 ### Data Type Codes
 
 Python exposes explicit mappings (`securemr/serialization.py:44-73`):
@@ -232,7 +234,8 @@ Below lists the supported operators observed in the serializers together with th
 
 #### `XR_SECURE_MR_OPERATOR_TYPE_SWAP_HWC_CHW_PICO` (`swap_hwc_chw`)
 - Calls `Pipeline::convertHWC_CHW` (`XR_SECURE_MR_OPERATOR_TYPE_SWAP_HWC_CHW_PICO`) to reorder tensor layout.
-- Inputs and outputs must have identical shapes with channel order swapped between HWC and CHW representations.
+- Inputs and outputs must use SecureMR channelized 3D matrix encoding. For an HWC tensor with `dimensions: [H, W]` and `channels: C`, the CHW tensor must be declared as `dimensions: [C, H]` and `channels: W`; the reverse direction uses the inverse mapping.
+- Native binding uses the default unary operator names (`operand` / `result`), not `src` / `dst`.
 - Handy before invoking neural-network runtimes expecting channel-first tensors.
 - Loader supported.
 

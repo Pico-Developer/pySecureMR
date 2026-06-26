@@ -25,6 +25,7 @@ from securemr.core.types import BaseType, EDataType, EOperatorType
 from securemr.core.utils import convert_from_dtype, convert_to_dtype, mat_flag, type_to_name
 
 from .tracer import TraceContext, TensorInfo, TracedOp
+from .verifier import validate_pipeline_spec
 
 __all__ = ["convert", "trace_to_pipeline_spec"]
 
@@ -347,6 +348,7 @@ def convert(
         Pipeline specification dictionary.
     """
     spec = trace_to_pipeline_spec(ctx)
+    validate_pipeline_spec(spec)
 
     if output is not None:
         output_path = Path(output)
