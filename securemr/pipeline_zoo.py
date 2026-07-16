@@ -74,12 +74,17 @@ class PipelineZooPackageSpec:
     supported_modes: Sequence[str] = field(default_factory=tuple)
     labels: Sequence[str] = field(default_factory=list)
     runtime: Mapping[str, Any] = field(default_factory=dict)
+    format_version: int = 1
     schema_version: str = "1.0"
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def to_manifest_dict(self) -> JsonDict:
         """Return a manifest dictionary matching the Pipeline Zoo package schema."""
-        manifest: JsonDict = {"schema_version": self.schema_version, "id": self.package_id}
+        manifest: JsonDict = {
+            "format_version": self.format_version,
+            "schema_version": self.schema_version,
+            "id": self.package_id,
+        }
         if self.task:
             manifest["task"] = self.task
         if self.display_name:
@@ -227,10 +232,12 @@ def load_pipeline_zoo_manifest(path: PathLike) -> JsonDict:
 
 def validate_pipeline_zoo_manifest(manifest: Mapping[str, Any]) -> None:
     """Validate the manifest fields required by the Pipeline Zoo package schema."""
-    required = ["id", "pipelines", "model"]
+    required = ["format_version", "id", "pipelines", "model"]
     missing = [key for key in required if key not in manifest]
     if missing:
         raise ValueError(f"Pipeline Zoo manifest missing required fields: {', '.join(missing)}")
+    if manifest["format_version"] != 1:
+        raise ValueError("Pipeline Zoo manifest format_version must be 1")
     if not isinstance(manifest["pipelines"], list) or not manifest["pipelines"]:
         raise ValueError("Pipeline Zoo manifest requires a non-empty 'pipelines' list")
     for index, pipeline in enumerate(manifest["pipelines"]):
