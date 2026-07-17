@@ -25,14 +25,44 @@ from typing import Any, Dict, List, Optional, Union
 import numpy as np
 
 from securemr.core.types import EOperatorType
-from securemr.core.utils import convert_to_dtype
+from securemr.core.utils import TensorType, convert_to_dtype
 
-__all__ = ["verify", "VerificationResult", "compare_outputs", "run_pipeline_python"]
+__all__ = [
+    "verify",
+    "VerificationResult",
+    "compare_outputs",
+    "run_pipeline_python",
+    "validate_pipeline_spec",
+]
 
 _OP_GET_TRANSFORM_MAT = getattr(EOperatorType, "GET_TRANSFORM_MAT", getattr(EOperatorType, "MAKE_TRANSFORM_MAT", None))
 _OP_LOAD_TEXTURE = getattr(EOperatorType, "LOAD_TEXTURE", getattr(EOperatorType, "UPLOAD_TEXTURE_TO_GLTF", None))
 _OP_SWAP_HWC_CHW = getattr(EOperatorType, "SWAP_HWC_CHW", getattr(EOperatorType, "CHW_HWC", None))
 _OP_JAVASCRIPT = getattr(EOperatorType, "JAVASCRIPT", getattr(EOperatorType, "JS_SCRIPTING", None))
+
+_OPERATOR_TYPE_ALIASES = {
+    "ARITHMETIC": "ARITHMETIC_COMPOSE",
+    "CAMERA_ACCESS": "RECTIFIED_VST_ACCESS",
+    "CAM_SPACE_TO_XR_LOCAL": "CAMERA_SPACE_TO_WORLD",
+    "COMPARE_TO": "CUSTOMIZED_COMPARE",
+    "CVT_COLOR": "CONVERT_COLOR",
+    "DRAW_TEXT": "RENDER_TEXT",
+    "GET_TRANSFORM_MATRIX": "GET_TRANSFORM_MAT",
+    "JS_SCRIPTING": "JAVASCRIPT",
+    "MAKE_TRANSFORM_MAT": "GET_TRANSFORM_MAT",
+    "NON_MAXIMUM_SUPPRESSION": "NMS",
+    "RENDER_GLTF": "SWITCH_GLTF_RENDER_STATUS",
+    "RUN_ALGORITHM": "RUN_MODEL_INFERENCE",
+    "SOLVE_PNP": "SOLVE_P_N_P",
+    "SORT_MATRIX": "SORT_MAT",
+    "SORT_VECTOR": "SORT_VEC",
+    "TRANSFORM": "GET_TRANSFORM_MAT",
+    "TYPE_CONVERT": "ASSIGNMENT",
+    "UPLOAD_TEXTURE_TO_GLTF": "LOAD_TEXTURE",
+    "UV2_CAM": "UV_TO_3D_IN_CAM_SPACE",
+    "UV_TO_3D_IN_CAMERA_SPACE": "UV_TO_3D_IN_CAM_SPACE",
+    "CHW_HWC": "SWAP_HWC_CHW",
+}
 
 
 @dataclass
@@ -44,6 +74,110 @@ class VerificationResult:
     max_abs_diff: Optional[Dict[str, float]] = None
     max_rel_diff: Optional[Dict[str, float]] = None
     error_message: Optional[str] = None
+
+
+def _is_matrix_tensor(tensor_spec: Dict[str, Any]) -> bool:
+    """Return True when a tensor descriptor declares MAT/matrix usage."""
+    tensor_type = tensor_spec.get("tensor_type") or tensor_spec.get("type")
+    if tensor_type is not None:
+        normalized = str(tensor_type).strip().lower().replace("-", "_")
+        if normalized in {"matrix", "mat"}:
+            return True
+
+    usage = tensor_spec.get("usage")
+    if usage is None:
+        return False
+
+    if isinstance(usage, str):
+        normalized = usage.strip().lower().replace("-", "_")
+        if normalized in {"matrix", "mat"}:
+            return True
+        try:
+            usage = int(usage, 0)
+        except ValueError:
+            return False
+
+    try:
+        return int(usage) == int(TensorType.MAT.value)
+    except (TypeError, ValueError):
+        return False
+
+
+def _tensor_dimensions_and_channels(tensor_spec: Dict[str, Any]) -> tuple[List[int], int]:
+    dimensions = tensor_spec.get("dimensions", [])
+    if not isinstance(dimensions, list):
+        dimensions = []
+    dims = [int(dim) for dim in dimensions]
+    channels = int(tensor_spec.get("channels", 1) or 1)
+    return dims, channels
+
+
+def _validate_swap_hwc_chw_operator(
+    op_spec: Dict[str, Any],
+    tensor_specs: Dict[str, Any],
+) -> None:
+    input_refs = op_spec.get("inputs", [])
+    output_refs = op_spec.get("outputs", [])
+    if len(input_refs) != 1 or len(output_refs) != 1:
+        raise ValueError("swap_hwc_chw requires exactly one input and one output tensor")
+
+    input_name = _resolve_tensor_name(input_refs[0])
+    output_name = _resolve_tensor_name(output_refs[0])
+    input_spec = tensor_specs.get(input_name or "")
+    output_spec = tensor_specs.get(output_name or "")
+    if input_spec is None or output_spec is None:
+        return
+
+    input_dims, input_channels = _tensor_dimensions_and_channels(input_spec)
+    output_dims, output_channels = _tensor_dimensions_and_channels(output_spec)
+    if len(input_dims) != 2:
+        raise ValueError(
+            f"swap_hwc_chw input '{input_name}' must be a 3D matrix encoded as "
+            "2 dimensions plus channels"
+        )
+
+    if input_channels <= 4:
+        expected_dims = [input_channels, input_dims[0]]
+        expected_channels = input_dims[1]
+    else:
+        expected_dims = [input_dims[1], input_channels]
+        expected_channels = input_dims[0]
+
+    if output_dims != expected_dims or output_channels != expected_channels:
+        raise ValueError(
+            f"swap_hwc_chw output '{output_name}' has dimensions {output_dims} "
+            f"and channels {output_channels}, expected dimensions {expected_dims} "
+            f"and channels {expected_channels} for input '{input_name}'"
+        )
+
+
+def validate_pipeline_spec(spec: Dict[str, Any]) -> None:
+    """Validate pipeline JSON rules that must match the native runtime.
+
+    Raises:
+        ValueError: If the pipeline spec contains an invalid tensor descriptor.
+    """
+    for name, tensor_spec in spec.get("tensors", {}).items():
+        if not isinstance(tensor_spec, dict):
+            continue
+        if not _is_matrix_tensor(tensor_spec):
+            continue
+
+        dimensions = tensor_spec.get("dimensions", [])
+        if not isinstance(dimensions, list) or len(dimensions) < 2:
+            raise ValueError(
+                f"Tensor '{name}' is declared as matrix/MAT usage but has "
+                f"dimensions {dimensions!r}; matrix tensors must have at least "
+                "2 dimensions. Use [1, N] or [N, 1] for vectors, or use a "
+                "scalar/point tensor type for 1D data."
+            )
+
+    tensor_specs = spec.get("tensors", {})
+    for op_spec in spec.get("operators", []):
+        if not isinstance(op_spec, dict):
+            continue
+        if _OP_SWAP_HWC_CHW is not None and _get_operator_type(op_spec.get("type", "")) == _OP_SWAP_HWC_CHW:
+            _validate_swap_hwc_chw_operator(op_spec, tensor_specs)
 
 
 def compare_outputs(
@@ -149,6 +283,8 @@ def run_pipeline_python(
     """
     from . import ops
 
+    validate_pipeline_spec(spec)
+
     # Initialize tensor storage with inputs
     tensors: Dict[str, np.ndarray] = dict(inputs)
 
@@ -202,6 +338,7 @@ def _get_operator_type(type_str: str) -> Optional[EOperatorType]:
         normalized = normalized[len("XR_SECURE_MR_OPERATOR_TYPE_"):]
     if normalized.endswith("_PICO"):
         normalized = normalized[:-len("_PICO")]
+    normalized = _OPERATOR_TYPE_ALIASES.get(normalized, normalized)
 
     # Try to get the enum member by name
     try:
@@ -527,10 +664,26 @@ def _execute_operator(
                 tensors[output_names[3]] = cam_mat
 
     elif op_type == EOperatorType.RUN_MODEL_INFERENCE:
-        model_file = op_spec.get("model_file_host") or op_spec.get("model_file") or op_spec.get("model")
+        model_ref = op_spec.get("model")
+        inline_model = model_ref if isinstance(model_ref, dict) else {}
+        model_file = (
+            op_spec.get("model_file_host")
+            or op_spec.get("model_file")
+            or op_spec.get("model_asset")
+            or inline_model.get("model_file_host")
+            or inline_model.get("model_file")
+            or inline_model.get("model_asset")
+            or inline_model.get("model_path")
+            or inline_model.get("bin_path")
+            or (model_ref if isinstance(model_ref, str) and ("/" in model_ref or "." in model_ref) else None)
+        )
         model_name = op_spec.get("model_name", "model")
         if not model_file:
-            raise ValueError("RUN_MODEL_INFERENCE requires model_file")
+            model_selector = op_spec.get("model_id") or (model_ref if isinstance(model_ref, str) else None)
+            raise ValueError(
+                "RUN_MODEL_INFERENCE requires model_file/model_asset for host verification; "
+                f"model selector {model_selector!r} must be resolved by a package deserializer"
+            )
         inputs_map: Dict[str, np.ndarray] = {}
         for ref in input_refs:
             if isinstance(ref, dict) and "name" in ref and "tensor" in ref:
@@ -621,6 +774,42 @@ def _execute_operator(
         outputs = ops_module.javascript(js_code, inputs_map, output_names)
         for name, value in outputs.items():
             tensors[name] = value
+
+    elif op_type == EOperatorType.SCENEGRAPH_VISIBILITY:
+        if input_tensors:
+            attrs = op_spec.get("attrs", [])
+            visible = op_spec.get("visible", attrs[0] if attrs else True)
+            if isinstance(visible, str):
+                visible = visible.strip().lower() not in {"0", "false", "no", "off"}
+            result = ops_module.scenegraph_visibility(input_tensors[0], visible=bool(visible))
+            if output_names:
+                tensors[output_names[0]] = result
+
+    elif op_type == EOperatorType.UPDATE_COMPONENT:
+        if input_tensors:
+            attrs = op_spec.get("attrs", [])
+            update_type = op_spec.get("update_type", attrs[0] if attrs else "")
+            result = ops_module.update_component(input_tensors[0], update_type=str(update_type))
+            if output_names:
+                tensors[output_names[0]] = result
+
+    elif op_type == EOperatorType.MICROPHONE:
+        shape = get_output_shape(output_names[0] if output_names else None) or (1,)
+        result = ops_module.microphone(output_shape=shape)
+        if output_names:
+            tensors[output_names[0]] = result
+
+    elif op_type == EOperatorType.SPEAKER:
+        if input_tensors:
+            result = ops_module.speaker(input_tensors[0])
+            if output_names:
+                tensors[output_names[0]] = result
+
+    elif op_type == EOperatorType.DEPTH:
+        shape = get_output_shape(output_names[0] if output_names else None) or (1, 1)
+        result = ops_module.depth(output_shape=shape)
+        if output_names:
+            tensors[output_names[0]] = result
 
     elif op_type == EOperatorType.UNKNOWN:
         if input_tensors:

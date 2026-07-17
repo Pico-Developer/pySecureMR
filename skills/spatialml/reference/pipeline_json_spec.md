@@ -1,6 +1,6 @@
 # SpatialML Pipeline JSON Spec
 
-This document consolidates how SecureMR pipelines are recorded to JSON by the Python serializer (`securemr/serialization.py`) and reconstructed by the C++ loader (`SecureMR_Samples/base/securemr_utils/serialization.cpp`).
+This document consolidates how SecureMR pipelines are recorded to JSON by the Python tools and reconstructed by package deserializers.
 Use it as a reference when authoring or reviewing pipeline specs.
 
 ## Top-level Object
@@ -20,6 +20,33 @@ Use it as a reference when authoring or reviewing pipeline specs.
 - `operators` is an ordered list; each entry describes one pipeline operator.
 - `inputs` / `outputs` are tensor name lists. In Python they also decide which tensors are marked `is_placeholder` before saving (`securemr/serialization.py:528-535`).
 
+## Package Manifest Notes
+
+Pipeline packages include a root `manifest.json` that points at pipeline JSON, model metadata, and package assets. Use `runtime.supported_modes` to indicate whether the package is valid in XR mode, Spatial mode, or both:
+
+```json
+{
+  "schema_version": "1.0",
+  "id": "example-package",
+  "pipelines": [{ "id": "main", "path": "pipeline/main.json" }],
+  "model": { "bin_path": "model/model.tflite", "json_path": "model/model.json" },
+  "runtime": { "supported_modes": ["xr", "spatial"] }
+}
+```
+
+Allowed execution mode values are `xr` and `spatial`. Include only the modes supported by the operators and assets in that package.
+
+Most operators are valid in both modes. The current mode-specific exceptions are:
+
+| Operator type | XR mode | Spatial mode | Notes |
+|---------------|---------|--------------|-------|
+| `XR_SECURE_MR_OPERATOR_TYPE_SWITCH_GLTF_RENDER_STATUS_PICO` | yes | no | GLTF rendering path. |
+| `XR_SECURE_MR_OPERATOR_TYPE_UPDATE_GLTF_PICO` | yes | no | GLTF rendering path. |
+| `XR_SECURE_MR_OPERATOR_TYPE_RENDER_TEXT_PICO` | yes | no | GLTF/text rendering path. |
+| `XR_SECURE_MR_OPERATOR_TYPE_LOAD_TEXTURE_PICO` | yes | no | GLTF texture upload path. |
+| `XR_SECURE_MR_OPERATOR_TYPE_SCENEGRAPH_VISIBILITY_PICO` | no | yes | Spatial scenegraph path. |
+| `XR_SECURE_MR_OPERATOR_TYPE_UPDATE_COMPONENT_PICO` | no | yes | Spatial component update path. |
+
 ## Tensor Descriptors
 
 Every tensor entry under `tensors` is an object with the following fields (`securemr/serialization.py:279-320`, `SecureMR_Samples/base/securemr_utils/serialization.cpp:479-499`):
@@ -34,6 +61,8 @@ Every tensor entry under `tensors` is an object with the following fields (`secu
 | `flag`         | int (optional)       | Bitmask combining data type with `smr.BaseType` modifiers (`smr.BaseType.MAT`, channel bits, etc.). |
 | `data` / `value` | array\<number> (optional) | Flattened tensor contents for preload. `data` and `value` are synonyms (`SecureMR_Samples/base/securemr_utils/serialization.cpp:340-414`). |
 | `is_gltf`      | bool (optional)      | Marks GLTF placeholders that skip numeric attributes (`serialization.cpp:483-488`). |
+
+Rule: tensors declared with MAT/matrix usage (`usage: 6`, `usage: "matrix"`, or `tensor_type: "matrix"`) must have at least two entries in `dimensions`. Use `[1, N]` or `[N, 1]` for vector-shaped matrix data; use scalar/point tensor usage for true one-dimensional scalar or point arrays.
 
 ### Data Type Codes
 
@@ -161,10 +190,10 @@ Below lists the supported operators observed in the serializers together with th
 - Use `expression` (or `attrs[0]`) to encode the formula with `{index}` placeholders and `+ - * /`, per `securemr_operators.md` §1.
 - Ensure the result tensor usage matches MAT; operands must be MAT or arrays of MAT tensors.
 
-#### `XR_SECURE_MR_OPERATOR_TYPE_ELEMENTWISE_MAX_PICO` (`elementwise_max`)
-- Share the same wiring through `Pipeline::elementwise` (`serialization.cpp:781-801`).
+#### `XR_SECURE_MR_OPERATOR_TYPE_ELEMENTWISE_MIN_PICO` / `XR_SECURE_MR_OPERATOR_TYPE_ELEMENTWISE_MAX_PICO` / `XR_SECURE_MR_OPERATOR_TYPE_ELEMENTWISE_MULTIPLY_PICO` / `XR_SECURE_MR_OPERATOR_TYPE_ELEMENTWISE_OR_PICO` / `XR_SECURE_MR_OPERATOR_TYPE_ELEMENTWISE_AND_PICO` (`elementwise_min`, `elementwise_max`, `elementwise_multiply`, `elementwise_or`, `elementwise_and`)
+- Share the same wiring through elementwise helpers (`serialization.cpp:781-801`).
 - Require two operands and at least one output; operands must have identical shape and channel layout.
-- Select the operation by choosing the `type` string listed above.
+- Select the operation by choosing one of the `type` strings listed above.
 - Use integer tensors for logical ops (`or`, `and`) and numeric tensors for `min`, `max`, `multiply`.
 
 #### `XR_SECURE_MR_OPERATOR_TYPE_NMS_PICO` (`nms`)
@@ -205,7 +234,8 @@ Below lists the supported operators observed in the serializers together with th
 
 #### `XR_SECURE_MR_OPERATOR_TYPE_SWAP_HWC_CHW_PICO` (`swap_hwc_chw`)
 - Calls `Pipeline::convertHWC_CHW` (`XR_SECURE_MR_OPERATOR_TYPE_SWAP_HWC_CHW_PICO`) to reorder tensor layout.
-- Inputs and outputs must have identical shapes with channel order swapped between HWC and CHW representations.
+- Inputs and outputs must use SecureMR channelized 3D matrix encoding. For an HWC tensor with `dimensions: [H, W]` and `channels: C`, the CHW tensor must be declared as `dimensions: [C, H]` and `channels: W`; the reverse direction uses the inverse mapping.
+- Native binding uses the default unary operator names (`operand` / `result`), not `src` / `dst`.
 - Handy before invoking neural-network runtimes expecting channel-first tensors.
 - Loader supported.
 
@@ -215,8 +245,8 @@ Below lists the supported operators observed in the serializers together with th
 - Ensure the operand is square and invertible; data type should be float per SecureMR guidance.
 - Needs explicit handling in the deserializer because the default code path does not know this type yet.
 
-#### `XR_SECURE_MR_OPERATOR_TYPE_MAKE_TRANSFORM_MAT_PICO` (`get_transform_mat`)
-- Backs `Pipeline::transform` (`XR_SECURE_MR_OPERATOR_TYPE_MAKE_TRANSFORM_MAT_PICO`) for building 4×4 transforms.
+#### `XR_SECURE_MR_OPERATOR_TYPE_GET_TRANSFORM_MAT_PICO` (`get_transform_mat`; legacy alias `MAKE_TRANSFORM_MAT`)
+- Backs `Pipeline::transform` for building 4×4 transforms.
 - Provide rotation and translation tensors; `inputs[2]` may optionally carry scale (omit to assume identity).
 - `outputs[0]` becomes a 4×4 float MAT combining the supplied components.
 - Loader supported.
@@ -227,10 +257,70 @@ Below lists the supported operators observed in the serializers together with th
 - `outputs[0]` returns the generated texture identifier tensor for subsequent render commands.
 - Not deserialized automatically yet; rely on a custom handler when recording GLTF texture uploads.
 
+#### `XR_SECURE_MR_OPERATOR_TYPE_SWITCH_GLTF_RENDER_STATUS_PICO` (`switch_gltf_render_status`)
+- Toggles rendering for a GLTF placeholder.
+- `inputs[0]` is the GLTF placeholder tensor; `inputs[1]` may optionally provide the pose/transform.
+- This is available in the Python creation and verification helpers for package specs that include GLTF assets.
+- XR mode only.
+
+#### `XR_SECURE_MR_OPERATOR_TYPE_UPDATE_GLTF_PICO` (`update_gltf`)
+- Applies a GLTF update command to the referenced placeholder.
+- `inputs[0]` is the GLTF placeholder tensor.
+- Provide the update command via `update_type` or `attrs[0]`.
+- XR mode only.
+
+#### `XR_SECURE_MR_OPERATOR_TYPE_RENDER_TEXT_PICO` (`render_text`)
+- Renders text into a texture-like tensor that can be used by GLTF/rendering operators.
+- `inputs[0]` is the target placeholder or texture tensor.
+- `config`/`attrs[0]` uses `typeface#language#width#height`; `text`/`attrs[1]` provides the rendered text.
+- XR mode only.
+
+#### `XR_SECURE_MR_OPERATOR_TYPE_SCENEGRAPH_VISIBILITY_PICO` (`scenegraph_visibility`)
+- Toggles Spatial scenegraph visibility.
+- `inputs[0]` is the scenegraph/component placeholder.
+- Use `visible` or `attrs[0]` as a boolean-like value.
+- Spatial mode only.
+
+#### `XR_SECURE_MR_OPERATOR_TYPE_UPDATE_COMPONENT_PICO` (`update_component`)
+- Updates a Spatial component payload.
+- `inputs[0]` is the component tensor or placeholder.
+- Provide the update command via `update_type` or `attrs[0]`.
+- Spatial mode only.
+
+#### `XR_SECURE_MR_OPERATOR_TYPE_MICROPHONE_PICO` (`microphone`)
+- Captures microphone data into the output tensor.
+- No required inputs; `outputs[0]` receives the audio buffer.
+- Available in both XR and Spatial modes.
+
+#### `XR_SECURE_MR_OPERATOR_TYPE_SPEAKER_PICO` (`speaker`)
+- Sends audio data to the speaker path.
+- `inputs[0]` is the audio tensor.
+- Available in both XR and Spatial modes.
+
+#### `XR_SECURE_MR_OPERATOR_TYPE_DEPTH_PICO` (`depth`)
+- Captures or exposes depth data into the output tensor.
+- No required inputs; `outputs[0]` receives the depth buffer.
+- Available in both XR and Spatial modes.
+
+#### `XR_SECURE_MR_OPERATOR_TYPE_JAVASCRIPT_PICO` (`javascript`; legacy alias `JS_SCRIPTING`)
+- Executes a JavaScript snippet to populate output tensors from named inputs.
+- Use `script` or `attrs[0]` for the JavaScript source.
+- `inputs` and `outputs` may use object references with `name` and `tensor` to preserve script-visible aliases.
+
+#### `XR_SECURE_MR_OPERATOR_TYPE_UNKNOWN_PICO` (`unknown`)
+- Reserved for explicitly unknown or pass-through operators in tests and custom pipelines.
+- Package deserializers should treat this like a custom operator unless they intentionally implement a fallback.
+
 #### `XR_SECURE_MR_OPERATOR_TYPE_RUN_MODEL_INFERENCE_PICO` (`run_algorithm`)
 - Designed for model execution pipelines (`serialization.cpp:915-996`).
 - `inputs` and `outputs` are arrays of `{ "name": alias, "tensor": tensor_name }`; strings default aliases to tensor names.
-- `model_name` is mandatory, and you must supply exactly one of `model_asset` (Android) or `model_file` (filesystem path).
+- For new SpatialML Pipeline Zoo packages, use LiteRT/TFLite fields: `model_name`, `model_type: "litert"`, `model_target` (for example `npu`), and optional `cpu_target_num_threads`.
+- Model selection supports three package-schema forms:
+  1. `model: "<manifest-model-id>"` references a model from the manifest.
+  2. `model_id: "<manifest-model-id>"` explicitly references a model from the manifest.
+  3. `model: { ... }` supplies an inline model spec; fields mirror manifest model entries and may include `bin_path`, `model_name`, `model_type`, `model_target`, and `cpu_target_num_threads`.
+- Operator-level fields such as `bin_path`, `model_name`, `model_type`, `model_target`, and `cpu_target_num_threads` override the selected manifest/inline model spec when a package deserializer supports that behavior.
+- Legacy QNN context-binary pipelines may still supply exactly one of `model_asset` (Android) or `model_file` (filesystem path), but this path is deprecated for new packages.
 - Python utilities (`add_model_inference_operator`, `convert_python_custom_to_run_algorithm`) populate tensors and metadata automatically (`securemr/serialization.py:621-712`).
 
 #### Custom operators

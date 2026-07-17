@@ -16,6 +16,7 @@
 import os
 import shutil
 import tempfile
+import warnings
 from typing import List, Tuple
 
 from ..generate_info import main as generate_info_main
@@ -51,6 +52,13 @@ def pytorch_to_qnn(
     Returns:
         Path to the converted model.
     """
+    warnings.warn(
+        "securemr.qnn.pytorch_to_qnn is deprecated for new SpatialML Pipeline Zoo packages. "
+        "Prefer exporting/converting to TFLite and generating a LiteRT package with securemr.pipeline_zoo; "
+        "QNN conversion is kept only for legacy context-binary workflows.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     assert TORCH_INSTALLED, "torch is requred."
     QNN_SDK_ROOT = os.getenv("QNN_SDK_ROOT", None)  # noqa
     if not QNN_SDK_ROOT:

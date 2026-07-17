@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Sequence
@@ -95,6 +96,16 @@ def _load_context_info(context_binary: str) -> Dict:
     raise RuntimeError(
         "Unable to obtain context metadata. Ensure qnn-context-binary-utility is "
         "available or provide a sidecar JSON file alongside the binary."
+    )
+
+
+def _warn_qnn_pipeline_deprecated() -> None:
+    warnings.warn(
+        "securemr.qnn.qnn_to_pipeline is deprecated for new SpatialML Pipeline Zoo packages. "
+        "Prefer LiteRT/TFLite pipeline specs and package manifests from securemr.pipeline_zoo; "
+        "QNN context-binary pipeline generation is kept only for legacy workflows.",
+        DeprecationWarning,
+        stacklevel=2,
     )
 
 
@@ -191,6 +202,7 @@ def build_pipeline_spec(
     device: str = "host",
 ) -> Dict:
     """Return a pipeline spec for ``context_binary``."""
+    _warn_qnn_pipeline_deprecated()
     context_binary = os.path.abspath(context_binary)
     metadata = _load_context_info(context_binary)
     graphs = metadata.get("info", {}).get("graphs", [])
