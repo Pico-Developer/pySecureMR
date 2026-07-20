@@ -61,6 +61,9 @@ Every tensor entry under `tensors` is an object with the following fields (`secu
 | `flag`         | int (optional)       | Bitmask combining data type with `smr.BaseType` modifiers (`smr.BaseType.MAT`, channel bits, etc.). |
 | `data` / `value` | array\<number> (optional) | Flattened tensor contents for preload. `data` and `value` are synonyms (`SecureMR_Samples/base/securemr_utils/serialization.cpp:340-414`). |
 | `is_gltf`      | bool (optional)      | Marks GLTF placeholders that skip numeric attributes (`serialization.cpp:483-488`). |
+| `tensor_type`  | string (optional)    | Shorthand accepted by package loaders for special tensors. Known values include `timestamp`, `gltf`, `scalar_array`, `point2_array`, `point3_array`, and `rgba_array`. |
+| `size`         | int (optional)       | Element count for special tensor shorthand such as `point2_array`, `point3_array`, and `scalar_array`. |
+| `asset`        | string (optional)    | Package-relative asset path for `tensor_type: "gltf"` tensors. Package loaders use it to materialize scene graph tensors from GLTF assets. |
 
 Rule: tensors declared with MAT/matrix usage (`usage: 6`, `usage: "matrix"`, or `tensor_type: "matrix"`) must have at least two entries in `dimensions`. Use `[1, N]` or `[N, 1]` for vector-shaped matrix data; use scalar/point tensor usage for true one-dimensional scalar or point arrays.
 
@@ -79,11 +82,69 @@ Python exposes explicit mappings (`securemr/serialization.py:44-73`):
 | 7    | `np.float64`| `FLOAT64` |
 
 `convert_from_dtype` and `convert_to_dtype` convert between numeric codes, numpy dtypes, and `smr.EDataType`.
+Package loaders may also accept string aliases for convenience, including `uint8`, `int8`, `uint16`, `int16`, `int32`, `float32`, `fp32`, `float64`, and `double`.
 
 ### Placeholder Semantics
 
 - During save the Python helper normalizes `is_placeholder` so only tensors referenced in `inputs` or `outputs` remain placeholders (`securemr/serialization.py:528-535`).
 - The C++ loader instantiates placeholders or allocates locals accordingly and preloads data when provided (`serialization.cpp:479-499`).
+
+## Model Metadata
+
+Pipeline packages can include model metadata in `manifest.model.json_path`, usually written as `model/model.json`.
+For LiteRT/TFLite packages, use the shape produced by `securemr.pipeline_zoo.create_litert_model_json`:
+
+```json
+{
+  "model_name": "main",
+  "path_to_zoo": "model.tflite",
+  "engine_type": "litert",
+  "model_target": "npu",
+  "input": [
+    {
+      "name": "image",
+      "shape": [1, 256, 256, 3],
+      "encoding_type": "FP32",
+      "alias_name": "image"
+    }
+  ],
+  "output": [
+    {
+      "name": "output",
+      "shape": [1, 1],
+      "encoding_type": "FP32",
+      "alias_name": "output"
+    }
+  ],
+  "specific_config": {
+    "model_target": "npu"
+  }
+}
+```
+
+Model metadata fields are:
+
+| Key | Type | Notes |
+|-----|------|-------|
+| `model_name` | string | Logical model name referenced by inference operators; package loaders commonly default to `main` when omitted. |
+| `path_to_zoo` | string | Package-relative path to the model binary from the model metadata file's directory. |
+| `engine_type` | string | Runtime family. New packages should use `litert`. |
+| `model_target` | string | Runtime backend. Use `npu` for NPU execution; `cpu` and `gpu` are also recognized where supported. |
+| `cpu_target_num_threads` | int (optional) | CPU thread count, only meaningful when `model_target` is `cpu`. Omit it for NPU packages. |
+| `input` / `output` | array\<object> | Model tensor metadata arrays. |
+| `input[].name` / `output[].name` | string | Model graph node name. |
+| `input[].shape` / `output[].shape` | array\<int> | Model tensor shape in model-runtime order. |
+| `input[].encoding_type` / `output[].encoding_type` | string | Encoding such as `FP32`, `UINT8`, or other runtime-supported encodings. |
+| `input[].alias_name` / `output[].alias_name` | string (optional) | Alias used by package generation and model-node binding helpers. |
+| `specific_config` | object (optional) | Runtime-specific configuration. For LiteRT packages, mirror `model_target` here when needed by package tools. |
+
+The manifest `model` object can point to this metadata:
+
+| Key | Type | Notes |
+|-----|------|-------|
+| `bin_path` | string | Package-relative model binary path, for loaders that read the model binary directly from the manifest. |
+| `json_path` | string | Package-relative model metadata JSON path. |
+| `extra_json_path` | string (optional) | Package-relative supplemental model metadata path. |
 
 ## Operator Entries
 
