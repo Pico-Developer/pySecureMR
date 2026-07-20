@@ -26,7 +26,6 @@ Pipeline packages include a root `manifest.json` that points at pipeline JSON, m
 
 ```json
 {
-  "format_version": 1,
   "schema_version": "1.0",
   "id": "example-package",
   "pipelines": [{ "id": "main", "path": "pipeline/main.json" }],
@@ -36,19 +35,6 @@ Pipeline packages include a root `manifest.json` that points at pipeline JSON, m
 ```
 
 Allowed execution mode values are `xr` and `spatial`. Include only the modes supported by the operators and assets in that package.
-The Spatial SDK package loader currently requires `format_version: 1` and a `runtime.supported_modes` array that includes `spatial`.
-
-The manifest fields used by Spatial SDK package loading are:
-
-| Key | Type | Notes |
-|-----|------|-------|
-| `format_version` | int | Required by the Spatial SDK package loader; must be `1`. |
-| `schema_version` | string | Package schema version, currently `"1.0"` for pipeline-zoo packages. |
-| `id` | string | Stable package id. |
-| `pipelines` | array\<object> | Pipeline entries with `id` and package-relative `path`. |
-| `model` | object (optional) | Model package entry. See model metadata below. |
-| `runtime.supported_modes` | array\<string> | Allowed values are `xr` and `spatial`; Spatial SDK package loading requires `spatial`. |
-| `runtime.detection_tensor` | string (optional) | Tensor name to bind as the detection output global tensor when present. |
 
 Most operators are valid in both modes. The current mode-specific exceptions are:
 
@@ -158,7 +144,7 @@ The manifest `model` object can point to this metadata:
 |-----|------|-------|
 | `bin_path` | string | Package-relative model binary path, for loaders that read the model binary directly from the manifest. |
 | `json_path` | string | Package-relative model metadata JSON path. |
-| `extra_json_path` | string (optional) | Package-relative supplemental model metadata path. Spatial SDK uses this before `json_path` when deriving the default model name. |
+| `extra_json_path` | string (optional) | Package-relative supplemental model metadata path. |
 
 ## Operator Entries
 
@@ -173,7 +159,7 @@ Common fields for every operator entry:
 
 ### Operator Dictionary by `type`
 
-Below lists the supported operators observed in the serializers together with the pipeline helpers that back them. Spatial SDK package loading accepts the canonical `XR_SECURE_MR_OPERATOR_TYPE_*_PICO` names plus selected lower-case aliases noted here.
+Below lists the supported operators observed in the serializers together with the pipeline helpers that back them. Entries that the default loader does not yet recognize must be handled through `PipelineDeserializationOptions::customOperatorHandler` (until the missing branch is added).
 
 #### `XR_SECURE_MR_OPERATOR_TYPE_RECTIFIED_VST_ACCESS_PICO` (`camera_access`)
 - Sets up the rectified VST capture operator; entries are injected by the Python helper (`securemr/serialization.py:554-603`).
@@ -181,17 +167,17 @@ Below lists the supported operators observed in the serializers together with th
 - Provide placeholder tensors sized per the SecureMR spec; the loader validates all four outputs.
 - No inputs, attributes, or alternate keys; the alias `camera_access` maps to `RECTIFIED_VST_ACCESS`.
 
-#### `XR_SECURE_MR_OPERATOR_TYPE_CAMERA_SPACE_TO_WORLD_PICO` (`camera_space_to_world`; Spatial SDK canonical alias `cam_space_to_xr_local`)
+#### `XR_SECURE_MR_OPERATOR_TYPE_CAMERA_SPACE_TO_WORLD_PICO` (`camera_space_to_world`)
 - Wraps `Pipeline::camSpace2XrLocal` and issues `XR_SECURE_MR_OPERATOR_TYPE_CAMERA_SPACE_TO_WORLD_PICO`.
 - Supply the timestamp tensor from `camera_access` as `inputs[0]`; no other inputs are used.
 - `outputs[0]` returns the right-eye 4×4 transform, `outputs[1]` (optional) returns the left-eye transform.
-- Spatial SDK package loading accepts the operator and currently treats it as a pass-through/no-op package entry.
+- Not yet wired into `serialization.cpp`; extend the loader or rely on a custom handler before round-tripping JSON.
 
-#### `XR_SECURE_MR_OPERATOR_TYPE_UV_TO_3D_IN_CAM_SPACE_PICO` (`uv_to_3d_in_cam_space`; Spatial SDK canonical alias `uv2_cam`)
+#### `XR_SECURE_MR_OPERATOR_TYPE_UV_TO_3D_IN_CAM_SPACE_PICO` (`uv_to_3d_in_cam_space`)
 - Implements `Pipeline::uv2Cam` (`XR_SECURE_MR_OPERATOR_TYPE_UV_TO_3D_IN_CAM_SPACE_PICO`) to lift UVs into 3D camera space.
 - Requires five inputs ordered as UV coordinates, timestamp, camera matrix, left RGB image, right RGB image.
 - `outputs[0]` stores the 3-channel floating-point point cloud; shape must mirror the UV tensor.
-- Spatial SDK package loading also accepts `uv_to_3d` and `uv_to_3d_in_camera_space`.
+- The shipped loader lacks this branch; reuse tensors produced by `camera_access` and handle deserialization manually for now.
 
 #### `XR_SECURE_MR_OPERATOR_TYPE_GET_AFFINE_PICO` (`get_affine`)
 - Supports inline arrays (`src_points`/`dst_points`) or tensor inputs to describe the three source and destination points (`serialization.cpp:584-613`).
@@ -209,7 +195,7 @@ Below lists the supported operators observed in the serializers together with th
 - Wraps `Pipeline::applyAffinePoint` to transform point arrays with the same affine matrix.
 - Provide the affine matrix and the input point tensor as the two inputs; the first output carries transformed points.
 - Ensure the result tensor has identical element count and channel layout as the input point tensor.
-- Spatial SDK package loading supports this operator.
+- Deserialization support is pending; hook it up via a custom handler until `serialization.cpp` gains this case.
 
 #### `XR_SECURE_MR_OPERATOR_TYPE_ASSIGNMENT_PICO` (`assignment`)
 - `inputs[0]` is the source tensor and `outputs[0]` the destination (`serialization.cpp:623-762`).
@@ -220,26 +206,26 @@ Below lists the supported operators observed in the serializers together with th
 #### `XR_SECURE_MR_OPERATOR_TYPE_CUSTOMIZED_COMPARE_PICO` (`customized_compare`)
 - Backed by `Pipeline::compareTo` (`XR_SECURE_MR_OPERATOR_TYPE_CUSTOMIZED_COMPARE_PICO`) to compare two tensors element-wise.
 - `inputs[0]` and `inputs[1]` are the left/right operands; they must share the same shape and channel count.
-- Provide the comparator via `compare` (one of `">"`, `"<"`, `"=="`, `">="`, `"<="`, `"!="`, or aliases such as `gt`/`eq`) or fall back to `attrs[0]`, matching `securemr_operators.md` §4.
-- `outputs[0]` stores the boolean/int result. Spatial SDK package loading canonicalizes this operator to `compare_to`.
+- Provide the comparator via `comparison` (one of `">"`, `"<"`, `"=="`, `">="`, `"<="`, `"!="`) or fall back to `attrs[0]`, matching `securemr_operators.md` §4.
+- `outputs[0]` stores the boolean/int result; add loader support before relying on automatic deserialization.
 
 #### `XR_SECURE_MR_OPERATOR_TYPE_ALL_PICO` (`all`)
 - Adds `XR_SECURE_MR_OPERATOR_TYPE_ALL_PICO` through `Pipeline::all` to reduce a tensor with logical AND.
 - `inputs[0]` accepts any boolean-compatible tensor; `outputs[0]` is a vector whose channel count is either 1 or matches the operand.
 - Reduction runs per channel when the result shares the operand’s channel count; otherwise all channels collapse into a single value.
-- Spatial SDK package loading maps this to `bytewiseAll`.
+- Currently missing in `serialization.cpp`; require a custom handler for JSON round-tripping.
 
 #### `XR_SECURE_MR_OPERATOR_TYPE_ANY_PICO` (`any`)
 - Builds on `Pipeline::any` for `XR_SECURE_MR_OPERATOR_TYPE_ANY_PICO`, reducing with logical OR.
 - The wiring mirrors `all`: single operand tensor and a scalar or per-channel result tensor.
 - Use this to detect whether any element is non-zero while preserving channel grouping when desired.
-- Spatial SDK package loading maps this to `bytewiseAny`.
+- Needs explicit loader support or custom handling because the default deserializer does not parse this type yet.
 
 #### `XR_SECURE_MR_OPERATOR_TYPE_ARGMAX_PICO` (`argmax`)
 - Wraps `Pipeline::argMax` to expose `XR_SECURE_MR_OPERATOR_TYPE_ARGMAX_PICO`.
 - Single operand at `inputs[0]`; `outputs[0]` stores per-channel indices of the maximal element as integers.
 - Result tensors typically use MAT usage with one channel (indices) unless you mirror the operand’s channels.
-- Spatial SDK package loading supports this operator.
+- Absent in `serialization.cpp`; extend the loader before serializing/deserializing this operator.
 
 #### `XR_SECURE_MR_OPERATOR_TYPE_CONVERT_COLOR_PICO` (`cvt_color`)
 - Mirrors `Pipeline::cvtColor` (`XR_SECURE_MR_OPERATOR_TYPE_CONVERT_COLOR_PICO`) to run OpenCV color conversions.
@@ -277,7 +263,7 @@ Below lists the supported operators observed in the serializers together with th
 - Provide `threshold` or `attrs[0]` as the IoU cut-off; loader parses numeric strings automatically (`securemr/serialization.py:347-352`).
 - Result tensors are optional—supply only the ones you need, leaving others absent or null.
 
-#### `XR_SECURE_MR_OPERATOR_TYPE_SOLVE_P_N_P_PICO` (`solve_p_n_p`; Spatial SDK canonical alias `solve_pnp`)
+#### `XR_SECURE_MR_OPERATOR_TYPE_SOLVE_P_N_P_PICO` (`solve_p_n_p`)
 - Wraps the SolvePnP helper (`serialization.cpp:829-893`) to estimate pose from 2D/3D correspondences.
 - Expect three inputs (object points, image points, camera matrix) plus optional outputs for rotation and translation.
 - Loader auto-converts tensor data into Point2/Point3 buffers when necessary, storing temporaries in `outResult.auxiliaryTensors`.
@@ -287,7 +273,7 @@ Below lists the supported operators observed in the serializers together with th
 - Exposes `Pipeline::sortVec` (`XR_SECURE_MR_OPERATOR_TYPE_SORT_VEC_PICO`) to sort 1-D vectors.
 - `inputs[0]` is the vector to sort; `outputs[0]` (optional) stores the sorted values, `outputs[1]` (optional) stores the original indices.
 - Operates on single-channel tensors; indices output must use an integer data type.
-- Spatial SDK package loading also accepts `sort_vector`.
+- Add a custom deserializer branch—`serialization.cpp` currently lacks explicit support.
 
 #### `XR_SECURE_MR_OPERATOR_TYPE_SORT_MAT_PICO` (`sort_mat`)
 - Uses `Pipeline::sortMatByRow` / `sortMatByColumn` via `XR_SECURE_MR_OPERATOR_TYPE_SORT_MAT_PICO` (`serialization.cpp:894-914`).
@@ -299,13 +285,13 @@ Below lists the supported operators observed in the serializers together with th
 - Wraps `Pipeline::singularValueDecomposition` for `XR_SECURE_MR_OPERATOR_TYPE_SVD_PICO`.
 - Requires one matrix input; outputs for singular values (`w`), left singular vectors (`u`), and right singular vectors (`vt`) are optional.
 - Shapes follow OpenCV’s SVD conventions; omit outputs you do not need to save memory.
-- Spatial SDK package loading supports one to three outputs.
+- Serialization support is not yet implemented; wire it via a custom handler if you need JSON specs today.
 
 #### `XR_SECURE_MR_OPERATOR_TYPE_NORM_PICO` (`norm`)
 - Implements `Pipeline::norm` (`XR_SECURE_MR_OPERATOR_TYPE_NORM_PICO`) to compute the vector norm of a tensor.
 - Single input tensor; single output scalar (or per-channel scalar) containing the norm result.
 - Use when you need L2-style reductions without normalizing the tensor itself.
-- Spatial SDK package loading supports this operator.
+- Not processed by the default loader; requires a custom branch to deserialize.
 
 #### `XR_SECURE_MR_OPERATOR_TYPE_SWAP_HWC_CHW_PICO` (`swap_hwc_chw`)
 - Calls `Pipeline::convertHWC_CHW` (`XR_SECURE_MR_OPERATOR_TYPE_SWAP_HWC_CHW_PICO`) to reorder tensor layout.
@@ -318,9 +304,9 @@ Below lists the supported operators observed in the serializers together with th
 - Uses `Pipeline::inversion` (`XR_SECURE_MR_OPERATOR_TYPE_INVERSION_PICO`) to compute matrix inverses.
 - One matrix input; one matrix output storing the inverted result.
 - Ensure the operand is square and invertible; data type should be float per SecureMR guidance.
-- Spatial SDK package loading supports this operator.
+- Needs explicit handling in the deserializer because the default code path does not know this type yet.
 
-#### `XR_SECURE_MR_OPERATOR_TYPE_GET_TRANSFORM_MAT_PICO` (`get_transform_mat`; Spatial SDK canonical alias `transform`; legacy alias `MAKE_TRANSFORM_MAT`)
+#### `XR_SECURE_MR_OPERATOR_TYPE_GET_TRANSFORM_MAT_PICO` (`get_transform_mat`; legacy alias `MAKE_TRANSFORM_MAT`)
 - Backs `Pipeline::transform` for building 4×4 transforms.
 - Provide rotation and translation tensors; `inputs[2]` may optionally carry scale (omit to assume identity).
 - `outputs[0]` becomes a 4×4 float MAT combining the supplied components.
@@ -330,42 +316,42 @@ Below lists the supported operators observed in the serializers together with th
 - Wraps `Pipeline::newTextureToGLTF` (`XR_SECURE_MR_OPERATOR_TYPE_LOAD_TEXTURE_PICO`) to inject textures into GLTF assets.
 - `inputs[0]` is the GLTF placeholder tensor; `inputs[1]` is the RGB texture data.
 - `outputs[0]` returns the generated texture identifier tensor for subsequent render commands.
-- Spatial SDK package loading accepts the operator and currently treats it as a pass-through/no-op package entry.
+- Not deserialized automatically yet; rely on a custom handler when recording GLTF texture uploads.
 
-#### `XR_SECURE_MR_OPERATOR_TYPE_SWITCH_GLTF_RENDER_STATUS_PICO` (`switch_gltf_render_status`; Spatial SDK canonical alias `render_gltf`)
+#### `XR_SECURE_MR_OPERATOR_TYPE_SWITCH_GLTF_RENDER_STATUS_PICO` (`switch_gltf_render_status`)
 - Toggles rendering for a GLTF placeholder.
 - `inputs[0]` is the GLTF placeholder tensor; `inputs[1]` may optionally provide the pose/transform.
 - This is available in the Python creation and verification helpers for package specs that include GLTF assets.
-- XR mode only. Spatial SDK package loading accepts the operator and currently treats it as a pass-through/no-op package entry.
+- XR mode only.
 
 #### `XR_SECURE_MR_OPERATOR_TYPE_UPDATE_GLTF_PICO` (`update_gltf`)
 - Applies a GLTF update command to the referenced placeholder.
 - `inputs[0]` is the GLTF placeholder tensor.
 - Provide the update command via `update_type` or `attrs[0]`.
-- XR mode only. Spatial SDK package loading accepts the operator and currently treats it as a pass-through/no-op package entry.
+- XR mode only.
 
-#### `XR_SECURE_MR_OPERATOR_TYPE_RENDER_TEXT_PICO` (`render_text`; Spatial SDK canonical alias `draw_text`)
+#### `XR_SECURE_MR_OPERATOR_TYPE_RENDER_TEXT_PICO` (`render_text`)
 - Renders text into a texture-like tensor that can be used by GLTF/rendering operators.
 - `inputs[0]` is the target placeholder or texture tensor.
 - `config`/`attrs[0]` uses `typeface#language#width#height`; `text`/`attrs[1]` provides the rendered text.
-- XR mode only. Spatial SDK package loading accepts the operator and currently treats it as a pass-through/no-op package entry.
+- XR mode only.
 
 #### `XR_SECURE_MR_OPERATOR_TYPE_SCENEGRAPH_VISIBILITY_PICO` (`scenegraph_visibility`)
 - Toggles Spatial scenegraph visibility.
 - `inputs[0]` is the scenegraph/component placeholder.
 - Use `visible` or `attrs[0]` as a boolean-like value.
-- Spatial mode only. Spatial SDK package loading accepts the operator and currently treats it as a pass-through/no-op package entry.
+- Spatial mode only.
 
 #### `XR_SECURE_MR_OPERATOR_TYPE_UPDATE_COMPONENT_PICO` (`update_component`)
 - Updates a Spatial component payload.
 - `inputs[0]` is the component tensor or placeholder.
 - Provide the update command via `update_type` or `attrs[0]`.
-- Spatial mode only. Spatial SDK package loading accepts the operator and currently treats it as a pass-through/no-op package entry.
+- Spatial mode only.
 
 #### `XR_SECURE_MR_OPERATOR_TYPE_MICROPHONE_PICO` (`microphone`)
 - Captures microphone data into the output tensor.
 - No required inputs; `outputs[0]` receives the audio buffer.
-- Available in both XR and Spatial modes. Spatial SDK package loading accepts the operator and currently treats it as a pass-through/no-op package entry.
+- Available in both XR and Spatial modes.
 
 #### `XR_SECURE_MR_OPERATOR_TYPE_SPEAKER_PICO` (`speaker`)
 - Sends audio data to the speaker path.
@@ -390,8 +376,11 @@ Below lists the supported operators observed in the serializers together with th
 - Designed for model execution pipelines (`serialization.cpp:915-996`).
 - `inputs` and `outputs` are arrays of `{ "name": alias, "tensor": tensor_name }`; strings default aliases to tensor names.
 - For new SpatialML Pipeline Zoo packages, use LiteRT/TFLite fields: `model_name`, `model_type: "litert"`, `model_target` (for example `npu`), and optional `cpu_target_num_threads`.
-- Spatial SDK package loading reads the model binary from manifest `model.bin_path`; operator-level `model_name`, `model_type`, and `model_target` select the invocation name and LiteRT backend.
-- Python package-zoo helpers may preserve broader model selector fields such as `model`, `model_id`, and inline model specs, but the current Spatial SDK loader does not use them for model selection.
+- Model selection supports three package-schema forms:
+  1. `model: "<manifest-model-id>"` references a model from the manifest.
+  2. `model_id: "<manifest-model-id>"` explicitly references a model from the manifest.
+  3. `model: { ... }` supplies an inline model spec; fields mirror manifest model entries and may include `bin_path`, `model_name`, `model_type`, `model_target`, and `cpu_target_num_threads`.
+- Operator-level fields such as `bin_path`, `model_name`, `model_type`, `model_target`, and `cpu_target_num_threads` override the selected manifest/inline model spec when a package deserializer supports that behavior.
 - Legacy QNN context-binary pipelines may still supply exactly one of `model_asset` (Android) or `model_file` (filesystem path), but this path is deprecated for new packages.
 - Python utilities (`add_model_inference_operator`, `convert_python_custom_to_run_algorithm`) populate tensors and metadata automatically (`securemr/serialization.py:621-712`).
 

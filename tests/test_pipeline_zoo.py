@@ -70,7 +70,6 @@ def test_write_pipeline_zoo_package_writes_manifest_and_assets(tmp_path):
         assets={"model/face_detector.tflite": model_file},
     )
 
-    assert manifest["format_version"] == 1
     assert manifest["schema_version"] == "1.0"
     assert manifest["runtime"]["supported_modes"] == ["xr", "spatial"]
     assert manifest["model"]["id"] == "default"
@@ -120,24 +119,7 @@ def test_configure_litert_inference_operator_supports_model_selectors():
 def test_validate_pipeline_zoo_manifest_rejects_path_traversal():
     with pytest.raises(ValueError, match="Invalid package-relative path"):
         validate_pipeline_zoo_manifest(
-            {
-                "format_version": 1,
-                "id": "bad",
-                "pipelines": [{"id": "p", "path": "../pipeline.json"}],
-                "model": {},
-            }
-        )
-
-
-def test_validate_pipeline_zoo_manifest_rejects_bad_format_version():
-    with pytest.raises(ValueError, match="format_version must be 1"):
-        validate_pipeline_zoo_manifest(
-            {
-                "format_version": 2,
-                "id": "bad",
-                "pipelines": [{"id": "p", "path": "pipeline.json"}],
-                "model": {"bin_path": "model/model.tflite", "json_path": "model/model.json"},
-            }
+            {"id": "bad", "pipelines": [{"id": "p", "path": "../pipeline.json"}], "model": {}}
         )
 
 
@@ -145,7 +127,6 @@ def test_validate_pipeline_zoo_manifest_rejects_unknown_execution_mode():
     with pytest.raises(ValueError, match="Unsupported execution mode"):
         validate_pipeline_zoo_manifest(
             {
-                "format_version": 1,
                 "id": "bad",
                 "pipelines": [{"id": "p", "path": "pipeline.json"}],
                 "model": {"bin_path": "model/model.tflite", "json_path": "model/model.json"},
@@ -156,7 +137,6 @@ def test_validate_pipeline_zoo_manifest_rejects_unknown_execution_mode():
     with pytest.raises(ValueError, match="supported_modes must be a list"):
         validate_pipeline_zoo_manifest(
             {
-                "format_version": 1,
                 "id": "bad",
                 "pipelines": [{"id": "p", "path": "pipeline.json"}],
                 "model": {"bin_path": "model/model.tflite", "json_path": "model/model.json"},
