@@ -133,12 +133,11 @@ def __getattr__(name: str):  # noqa: D401
 
         return _ti
     if name in {
-        "ModelPackageSpec",
         "PipelinePackageEntry",
         "PipelineZooPackageSpec",
         "SUPPORTED_EXECUTION_MODES",
         "configure_litert_inference_operator",
-        "create_litert_model_json",
+        "create_litert_model_spec",
         "load_pipeline_zoo_manifest",
         "validate_pipeline_zoo_manifest",
         "write_pipeline_zoo_package",
@@ -188,12 +187,11 @@ __all__ = [
     "TensorTimestampInt32",
     "HAS_BINDINGS",
     "TORCH_INSTALLED",
-    "ModelPackageSpec",
     "PipelinePackageEntry",
     "PipelineZooPackageSpec",
     "SUPPORTED_EXECUTION_MODES",
     "configure_litert_inference_operator",
-    "create_litert_model_json",
+    "create_litert_model_spec",
     "load_pipeline_zoo_manifest",
     "validate_pipeline_zoo_manifest",
     "write_pipeline_zoo_package",

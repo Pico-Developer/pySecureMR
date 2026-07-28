@@ -214,7 +214,7 @@ class QNNModelInfo(object):
         """
         warnings.warn(
             "QNNModelInfo.to_json emits legacy QNN model metadata. New SpatialML Pipeline Zoo packages "
-            "should use securemr.pipeline_zoo.create_litert_model_json for LiteRT/TFLite model metadata.",
+            "should use securemr.pipeline_zoo.create_litert_model_spec for inline LiteRT/TFLite model metadata.",
             DeprecationWarning,
             stacklevel=2,
         )

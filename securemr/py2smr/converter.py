@@ -324,7 +324,6 @@ def trace_to_pipeline_spec(ctx: TraceContext) -> Dict[str, Any]:
 
     # Build final spec
     spec = {
-        "metadata": {"version": 1},
         "tensors": tensors,
         "operators": operators,
         "inputs": inputs,

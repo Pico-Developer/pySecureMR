@@ -253,7 +253,6 @@ def build_pipeline_spec(
     }
 
     spec = {
-        "metadata": {"version": 1},
         "tensors": tensors,
         "operators": [js_operator, model_operator],
         "inputs": [],

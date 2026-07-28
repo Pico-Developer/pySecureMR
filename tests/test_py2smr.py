@@ -221,7 +221,6 @@ class TestConverter:
 
         spec = trace_to_pipeline_spec(ctx)
 
-        assert "metadata" in spec
         assert "tensors" in spec
         assert "operators" in spec
         assert "inputs" in spec
@@ -534,7 +533,6 @@ class TestIntegration:
                 loaded_spec = json.load(f)
 
             # Verify loaded spec is valid
-            assert "metadata" in loaded_spec
             assert "tensors" in loaded_spec
             assert "operators" in loaded_spec
             assert loaded_spec["inputs"] == ["x"]
@@ -551,7 +549,6 @@ class TestPythonExecutor:
         from securemr.py2smr.verifier import run_pipeline_python
 
         spec = {
-            "metadata": {"version": 1},
             "tensors": {
                 "input": {"dimensions": [2, 2], "channels": 1, "data_type": 6},
                 "output": {"dimensions": [2, 2], "channels": 1, "data_type": 6},
@@ -579,7 +576,6 @@ class TestPythonExecutor:
         from securemr.py2smr.verifier import run_pipeline_python
 
         spec = {
-            "metadata": {"version": 1},
             "tensors": {
                 "input": {"dimensions": [2, 2], "channels": 1, "data_type": 6},
                 "temp": {"dimensions": [2, 2], "channels": 1, "data_type": 6},

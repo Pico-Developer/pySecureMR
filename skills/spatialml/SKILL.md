@@ -19,8 +19,7 @@ The package schema expects a directory containing:
 
 - `manifest.json` at the package root.
 - One or more pipeline JSON files referenced by `manifest.pipelines[].path`.
-- A TFLite model file referenced by `manifest.model.bin_path`.
-- A LiteRT model metadata file referenced by `manifest.model.json_path`.
+- TFLite model files referenced by inline `RUN_MODEL_INFERENCE` operator model specs.
 - Optional binary assets such as glTF files referenced by package-relative paths.
 - `manifest.runtime.supported_modes` lists where the package is valid: `xr`, `spatial`, or both. Set this explicitly because some operators differ by execution mode.
 
@@ -28,11 +27,9 @@ Use `securemr.pipeline_zoo` to emit schema-compatible fields:
 
 ```python
 from securemr.pipeline_zoo import (
-    ModelPackageSpec,
     PipelinePackageEntry,
     PipelineZooPackageSpec,
     configure_litert_inference_operator,
-    create_litert_model_json,
     write_pipeline_zoo_package,
 )
 
@@ -41,6 +38,7 @@ pipeline = {
     "operators": [
         configure_litert_inference_operator(
             {"type": "RUN_MODEL_INFERENCE", "inputs": [], "outputs": []},
+            model_path="model/face_detector.tflite",
             model_name="face_detector",
             model_target="npu",
         )
@@ -52,7 +50,6 @@ pipeline = {
 package = PipelineZooPackageSpec(
     package_id="face",
     pipelines=[PipelinePackageEntry("detection", "pipeline/face_detection_pipeline.json")],
-    model=ModelPackageSpec("model/face_detector.tflite", "model/model.json"),
     supported_modes=["xr", "spatial"],
     runtime={"detection_tensor": "detections"},
 )
@@ -61,21 +58,18 @@ write_pipeline_zoo_package(
     "face-mediapipe-pipeline",
     package,
     pipelines={"detection": pipeline},
-    model_json=create_litert_model_json("model/face_detector.tflite", "face_detector"),
     assets={"model/face_detector.tflite": "face_detector.tflite"},
 )
 ```
 
 For `RUN_MODEL_INFERENCE` operators in new packages:
 
-- Set `model_type` to `litert`.
+- Put model metadata inline under `model`; do not use manifest-level `model` / `models`.
+- Set `model_type` to `tflite`.
 - Set `model_target` to the desired backend (`npu` by default).
 - Set `cpu_target_num_threads` when CPU fallback is expected.
-- Select the model using one of the schema-supported forms:
-  - `model: "<manifest-model-id>"` to reference a manifest model by id.
-  - `model_id: "<manifest-model-id>"` as an explicit model-id selector.
-  - `model: { ... }` to provide an inline model spec with fields such as `bin_path`, `model_name`, `model_type`, and `model_target`.
-- Do not use QNN-only `model_asset` or filesystem `model_file` fields in package-authored LiteRT operators.
+- Include `bin_path`, `model_name`, `model_type`, and `model_target` in the inline model spec.
+- Do not use QNN-only `model_asset` or filesystem `model_file` fields in package-authored TFLite operators.
 
 ## Legacy QNN conversion (deprecated)
 

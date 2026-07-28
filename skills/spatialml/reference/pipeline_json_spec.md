@@ -3,38 +3,21 @@
 This document consolidates how SecureMR pipelines are recorded to JSON by the Python tools and reconstructed by package deserializers.
 Use it as a reference when authoring or reviewing pipeline specs.
 
-## Top-level Object
+## Package Manifest
+
+Pipeline packages include a root `manifest.json` that points at pipeline JSON and package assets. Model metadata is carried inline by model inference operators. Use `runtime.supported_modes` to indicate whether the package is valid in XR mode, Spatial mode, or both:
 
 ```json
 {
-  "metadata": { "version": 1 },
-  "tensors": { "<tensor_name>": { ... } },
-  "operators": [ { ... } ],
-  "inputs": [ "<tensor_name>", ... ],
-  "outputs": [ "<tensor_name>", ... ]
-}
-```
-
-- `metadata.version` is currently `1` (`securemr/serialization.py:264-274`).
-- `tensors` holds named tensor descriptors (see below). Names referenced anywhere else must exist here.
-- `operators` is an ordered list; each entry describes one pipeline operator.
-- `inputs` / `outputs` are tensor name lists. In Python they also decide which tensors are marked `is_placeholder` before saving (`securemr/serialization.py:528-535`).
-
-## Package Manifest Notes
-
-Pipeline packages include a root `manifest.json` that points at pipeline JSON, model metadata, and package assets. Use `runtime.supported_modes` to indicate whether the package is valid in XR mode, Spatial mode, or both:
-
-```json
-{
-  "schema_version": "1.0",
+  "schema_version": "2",
   "id": "example-package",
   "pipelines": [{ "id": "main", "path": "pipeline/main.json" }],
-  "model": { "bin_path": "model/model.tflite", "json_path": "model/model.json" },
   "runtime": { "supported_modes": ["xr", "spatial"] }
 }
 ```
 
 Allowed execution mode values are `xr` and `spatial`. Include only the modes supported by the operators and assets in that package.
+Schema version 2 removes manifest-level `model` / `models` entries and external model metadata JSON files.
 
 Most operators are valid in both modes. The current mode-specific exceptions are:
 
@@ -89,17 +72,17 @@ Package loaders may also accept string aliases for convenience, including `uint8
 - During save the Python helper normalizes `is_placeholder` so only tensors referenced in `inputs` or `outputs` remain placeholders (`securemr/serialization.py:528-535`).
 - The C++ loader instantiates placeholders or allocates locals accordingly and preloads data when provided (`serialization.cpp:479-499`).
 
-## Model Metadata
+## Inline Model Metadata
 
-Pipeline packages can include model metadata in `manifest.model.json_path`, usually written as `model/model.json`.
-For LiteRT/TFLite packages, use the shape produced by `securemr.pipeline_zoo.create_litert_model_json`:
+Model inference operators carry their model metadata inline under the operator `model` key. For LiteRT/TFLite packages, use the shape produced by `securemr.pipeline_zoo.create_litert_model_spec`:
 
 ```json
 {
+  "bin_path": "model/model.tflite",
   "model_name": "main",
-  "path_to_zoo": "model.tflite",
-  "engine_type": "litert",
+  "model_type": "tflite",
   "model_target": "npu",
+  "cpu_target_num_threads": 1,
   "input": [
     {
       "name": "image",
@@ -115,10 +98,7 @@ For LiteRT/TFLite packages, use the shape produced by `securemr.pipeline_zoo.cre
       "encoding_type": "FP32",
       "alias_name": "output"
     }
-  ],
-  "specific_config": {
-    "model_target": "npu"
-  }
+  ]
 }
 ```
 
@@ -126,9 +106,9 @@ Model metadata fields are:
 
 | Key | Type | Notes |
 |-----|------|-------|
+| `bin_path` | string | Package-relative model binary path. |
 | `model_name` | string | Logical model name referenced by inference operators; package loaders commonly default to `main` when omitted. |
-| `path_to_zoo` | string | Package-relative path to the model binary from the model metadata file's directory. |
-| `engine_type` | string | Runtime family. New packages should use `litert`. |
+| `model_type` | string | Runtime family. New TFLite packages should use `tflite`. |
 | `model_target` | string | Runtime backend. Use `npu` for NPU execution; `cpu` and `gpu` are also recognized where supported. |
 | `cpu_target_num_threads` | int (optional) | CPU thread count, only meaningful when `model_target` is `cpu`. Omit it for NPU packages. |
 | `input` / `output` | array\<object> | Model tensor metadata arrays. |
@@ -136,15 +116,6 @@ Model metadata fields are:
 | `input[].shape` / `output[].shape` | array\<int> | Model tensor shape in model-runtime order. |
 | `input[].encoding_type` / `output[].encoding_type` | string | Encoding such as `FP32`, `UINT8`, or other runtime-supported encodings. |
 | `input[].alias_name` / `output[].alias_name` | string (optional) | Alias used by package generation and model-node binding helpers. |
-| `specific_config` | object (optional) | Runtime-specific configuration. For LiteRT packages, mirror `model_target` here when needed by package tools. |
-
-The manifest `model` object can point to this metadata:
-
-| Key | Type | Notes |
-|-----|------|-------|
-| `bin_path` | string | Package-relative model binary path, for loaders that read the model binary directly from the manifest. |
-| `json_path` | string | Package-relative model metadata JSON path. |
-| `extra_json_path` | string (optional) | Package-relative supplemental model metadata path. |
 
 ## Operator Entries
 
@@ -375,13 +346,8 @@ Below lists the supported operators observed in the serializers together with th
 #### `XR_SECURE_MR_OPERATOR_TYPE_RUN_MODEL_INFERENCE_PICO` (`run_algorithm`)
 - Designed for model execution pipelines (`serialization.cpp:915-996`).
 - `inputs` and `outputs` are arrays of `{ "name": alias, "tensor": tensor_name }`; strings default aliases to tensor names.
-- For new SpatialML Pipeline Zoo packages, use LiteRT/TFLite fields: `model_name`, `model_type: "litert"`, `model_target` (for example `npu`), and optional `cpu_target_num_threads`.
-- Model selection supports three package-schema forms:
-  1. `model: "<manifest-model-id>"` references a model from the manifest.
-  2. `model_id: "<manifest-model-id>"` explicitly references a model from the manifest.
-  3. `model: { ... }` supplies an inline model spec; fields mirror manifest model entries and may include `bin_path`, `model_name`, `model_type`, `model_target`, and `cpu_target_num_threads`.
-- Operator-level fields such as `bin_path`, `model_name`, `model_type`, `model_target`, and `cpu_target_num_threads` override the selected manifest/inline model spec when a package deserializer supports that behavior.
-- Legacy QNN context-binary pipelines may still supply exactly one of `model_asset` (Android) or `model_file` (filesystem path), but this path is deprecated for new packages.
+- For new SpatialML Pipeline Zoo packages, put model metadata inline under `model` with `bin_path`, `model_name`, `model_type: "tflite"`, `model_target` (for example `npu`), and optional `cpu_target_num_threads`.
+- Schema version 2 does not use manifest-level model ids, `model_id`, external model metadata JSON files, `model_asset`, or filesystem `model_file` fields for package-authored TFLite operators.
 - Python utilities (`add_model_inference_operator`, `convert_python_custom_to_run_algorithm`) populate tensors and metadata automatically (`securemr/serialization.py:621-712`).
 
 #### Custom operators
