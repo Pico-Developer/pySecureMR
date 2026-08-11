@@ -157,22 +157,12 @@ def _op_to_spec(op: TracedOp) -> Dict[str, Any]:
             spec["cpu_target_num_threads"] = op.extra_info["cpu_target_num_threads"]
         if "model" in op.extra_info:
             spec["model"] = op.extra_info["model"]
-        if "model_id" in op.extra_info:
-            spec["model_id"] = op.extra_info["model_id"]
-        if "model_asset" in op.extra_info:
-            spec["model_asset"] = op.extra_info["model_asset"]
-        elif "device_model_file" in op.extra_info:
-            spec["model_file"] = op.extra_info["device_model_file"]
-        elif "model_file" in op.extra_info:
-            spec["model_file"] = op.extra_info["model_file"]
         if "model_name" in op.extra_info:
             spec["model_name"] = op.extra_info["model_name"]
         if "input_aliasing" in op.extra_info:
             spec["input_aliasing"] = op.extra_info["input_aliasing"]
         if "output_aliasing" in op.extra_info:
             spec["output_aliasing"] = op.extra_info["output_aliasing"]
-        if "model_file_host" in op.extra_info:
-            spec["model_file_host"] = op.extra_info["model_file_host"]
     elif op.op_type == EOperatorType.ASSIGNMENT:
         if "src_slices" in op.extra_info:
             spec["src_slices"] = op.extra_info["src_slices"]

@@ -1,5 +1,5 @@
 python_code="infer_cards_onnx.py"
-pysecuremr="../../"
+pyspatialml="../../"
 output=yolov8_convert.py
 
 echo "
@@ -10,9 +10,9 @@ echo "
 如果在调试中遇到securemr operator不支持的情况，参考spatialml skill中的operator_tips，尽可能去实现
 
 # Inputs（路径 / repo / 版本）
-1. pysecuremr: ${pysecuremr}
-2. mnistwild.py: ${pysecuremr}/examples/mnistwild/mnistwild.py
-3. spatialml skill: ${pysecuremr}/skills/spatialml/SKILL.md
+1. pyspatialml: ${pyspatialml}
+2. mnistwild.py: ${pyspatialml}/examples/mnistwild/mnistwild.py
+3. spatialml skill: ${pyspatialml}/skills/spatialml/SKILL.md
 4. 使用.venv环境运行python程序
 
 # Non-goals（明确不做什么）
@@ -32,9 +32,9 @@ echo "
 8. 可视化pipeline json保存的结果，和python结果做对比。
 
 # Done（可自动验证）
-1. python ${python_code} 运行的结果，和利用pipeline inspect工具(python -m securemr.inspect.pipeline_cli)得到的结果，数值一致。
+1. python ${python_code} 运行的结果，和利用pyspatialml run host/device得到的结果，数值一致。
 2. 保存两个可视化结果。
-3. ${python_code}的全部operator都用securemr operator实现，且直接用pipeline_cli校验端到端的结果，数值一致。
+3. ${python_code}的全部operator都用securemr operator实现，且直接用pyspatialml run host/device校验端到端的结果，数值一致。
 
 确保直到done条件完成了，才可以停止任务。
 确保直到done条件完成了，才可以停止任务。

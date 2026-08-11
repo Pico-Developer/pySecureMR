@@ -14,12 +14,13 @@ import numpy as np
 import onnxruntime as ort
 import securemr as smr
 from securemr.core.utils import convert_from_dtype, convert_to_dtype, mat_flag
-from securemr.serialization import type_to_name
+from securemr.core.utils import type_to_name
+from securemr.pipeline_zoo import create_litert_model_spec
 
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[1]
 PIPELINE_JSON = ROOT / "yolov8s_cards_pipeline.json"
-MODEL_ASSET = "yolov8s_playing_cards.serialized.bin"
+MODEL_ASSET = "model/yolov8s_playing_cards.tflite"
 
 # Constants
 TARGET_SIZE = 416
@@ -161,7 +162,7 @@ def build_pipeline_spec(img_shape: Tuple[int, int], target: int = TARGET_SIZE) -
     The pipeline implements:
     1. Letterbox preprocessing (resize + pad to 416x416)
     2. RGB conversion and normalization
-    3. QNN model inference
+    3. LiteRT/TFLite model inference
     4. Transpose model output and extract boxes/scores
     5. Sigmoid activation on class scores
     6. Sort to find best class per anchor
@@ -240,7 +241,7 @@ def build_pipeline_spec(img_shape: Tuple[int, int], target: int = TARGET_SIZE) -
             "is_placeholder": True, "usage": 6,
             "flag": mat_flag(smr.EDataType.FLOAT32, 3),
         },
-        # Model output: QNN outputs [1, 56, 3549] -> stored as [56, 3549]
+        # Model output: TFLite outputs [1, 56, 3549] -> stored as [56, 3549]
         "model_output_raw": {
             "dimensions": [56, NUM_ANCHORS], "channels": 1,
             "data_type": convert_from_dtype(np.float32),
@@ -264,14 +265,33 @@ def build_pipeline_spec(img_shape: Tuple[int, int], target: int = TARGET_SIZE) -
          "inputs": [{"name": "images", "tensor": "normalized"}],
          "outputs": [{"name": "output0", "tensor": "model_output_raw"}],
          "model_name": "yolov8s_playing_cards",
-         "model_file": "/sdcard/Android/data/com.bytedance.pico.secure_mr_demo.pipeline_inspect/files/" + MODEL_ASSET},
+         "model_type": "tflite",
+         "model": create_litert_model_spec(
+             MODEL_ASSET,
+             "yolov8s_playing_cards",
+             input_tensors=[
+                 {
+                     "name": "images",
+                     "shape": [1, target, target, 3],
+                     "encoding_type": "FP32",
+                     "alias_name": "normalized",
+                 }
+             ],
+             output_tensors=[
+                 {
+                     "name": "output0",
+                     "shape": [1, 56, NUM_ANCHORS],
+                     "encoding_type": "FP32",
+                     "alias_name": "model_output_raw",
+                 }
+             ],
+         )},
         
         # NOTE: Post-processing (transpose, sigmoid, NMS) is done in Python.
         # ARITHMETIC_COMPOSE T({0}) doesn't work correctly on this device.
     ]
 
     return {
-        "metadata": {"version": 1},
         "tensors": tensors,
         "operators": operators,
         "inputs": ["input_bgr"],
@@ -295,47 +315,6 @@ def dump_binary(arr: np.ndarray, path: Path, dtype: np.dtype) -> None:
     print(f"Wrote {path} ({arr.size} values, dtype={dtype})")
 
 
-def run_pipeline_inspect(pipeline: Path, input_bin: Path, input_tensor: str) -> Path:
-    """Invoke pipeline_inspect via adb."""
-    python_bin = REPO_ROOT / ".venv" / "bin" / "python"
-    cmd = [str(python_bin), "-m", "securemr.inspect.pipeline_cli", "--pipeline", str(pipeline), "--input", str(input_bin), "--input-tensor", input_tensor, "--duration", "25"]
-    print("Running:", " ".join(cmd))
-    subprocess.run(cmd, check=True, cwd=REPO_ROOT)
-    latest = sorted((REPO_ROOT / "tmp_data").glob("pipeline_inspect_outputs_*"))[-1]
-    print(f"Pipeline inspect outputs in {latest}")
-    return latest
-
-
-def load_output_bins(out_dir: Path, spec: Dict) -> Dict[str, np.ndarray]:
-    tensors = spec.get("tensors", {})
-    outputs = set(spec.get("outputs", []))
-    result: Dict[str, np.ndarray] = {}
-    for path in sorted(out_dir.glob("pipeline_inspect_output_*.bin")):
-        stem = path.stem.replace("pipeline_inspect_output_", "")
-        target_name = None
-        for name in outputs:
-            if name in stem:
-                target_name = name
-                break
-        if target_name is None:
-            target_name = stem
-        info = tensors.get(target_name, {})
-        dtype_idx = int(info.get("data_type", convert_from_dtype(np.float32)))
-        dtype = convert_to_dtype(dtype_idx, target="numpy")
-        data = np.fromfile(str(path), dtype=dtype)
-        dims = list(info.get("dimensions", []))
-        channels = int(info.get("channels", 1))
-        shape = dims + ([channels] if channels != 1 else [])
-        if shape:
-            try:
-                data = data.reshape(shape)
-            except ValueError:
-                pass
-        result[target_name] = data
-        print(f"Loaded {target_name}: shape={data.shape}, dtype={data.dtype}")
-    return result
-
-
 def visualize_detections(img: np.ndarray, dets, names: List[str], out_path: Path) -> None:
     vis = img.copy()
     for x1, y1, x2, y2, s, c in dets:
@@ -351,10 +330,6 @@ def visualize_detections(img: np.ndarray, dets, names: List[str], out_path: Path
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--run-device", action="store_true", help="Run pipeline_inspect on connected device")
-    args = parser.parse_args()
-
     img_path = ROOT / "card.jpeg"
     onnx_path = ROOT / "yolov8s_playing_cards.onnx"
 
@@ -371,94 +346,7 @@ def main():
         x1, y1, x2, y2, s, c = det
         print(f"  {ref['names'][c]}: score={s:.4f}, box=[{x1:.1f}, {y1:.1f}, {x2:.1f}, {y2:.1f}]")
 
-    if args.run_device:
-        out_dir = run_pipeline_inspect(PIPELINE_JSON, ROOT / "card_input_uint8.bin", "input_bgr")
-        outputs = load_output_bins(out_dir, spec)
-        
-        # Check preprocessing output
-        if "letterbox_rgb" in outputs:
-            lb_rgb = outputs["letterbox_rgb"]
-            print(f"\n=== Preprocessing check ===")
-            print(f"letterbox_rgb shape: {lb_rgb.shape}, expected: {ref['letterbox_rgb'].shape}")
-            cv2.imwrite(str(ROOT / "card_preprocessed_pipeline.jpeg"), cv2.cvtColor(lb_rgb, cv2.COLOR_RGB2BGR))
-            print(f"Preprocessing allclose: {np.allclose(lb_rgb, ref['letterbox_rgb'], rtol=1, atol=1)}")
-        
-        # Check normalized input
-        if "normalized" in outputs:
-            norm = outputs["normalized"]
-            print(f"\n=== Normalized input check ===")
-            print(f"normalized shape: {norm.shape}")
-            ref_norm = ref["model_input"][0].transpose(1, 2, 0)  # CHW -> HWC
-            print(f"normalized range: [{norm.min():.4f}, {norm.max():.4f}]")
-            print(f"reference range: [{ref_norm.min():.4f}, {ref_norm.max():.4f}]")
-            print(f"Normalized allclose: {np.allclose(norm, ref_norm, rtol=1e-3, atol=1e-3)}")
-        
-        # Check model output
-        model_out = outputs.get("model_output_raw")
-        if model_out is not None:
-            print(f"\n=== Model output check ===")
-            model_out = model_out.reshape((1, 56, NUM_ANCHORS))
-            print(f"Model output shape: {model_out.shape}")
-            print(f"Model output range: [{model_out.min():.4f}, {model_out.max():.4f}]")
-            print(f"Reference range: [{ref['model_output'].min():.4f}, {ref['model_output'].max():.4f}]")
-            print(f"Model output allclose: {np.allclose(model_out, ref['model_output'], rtol=1e-2, atol=1e-2)}")
-            
-            # Run post-processing on device model output using Python
-            dets_from_device = postprocess([model_out], ref["names"], ref["image"], ref["ratio"], ref["pad"])
-            print(f"\n=== Post-processing on device model output ===")
-            for det in dets_from_device:
-                x1, y1, x2, y2, s, c = det
-                print(f"  {ref['names'][c]}: score={s:.4f}, box=[{x1:.1f}, {y1:.1f}, {x2:.1f}, {y2:.1f}]")
-            visualize_detections(ref["image"], dets_from_device, ref["names"], ROOT / "card_output_pipeline.jpeg")
-            np.save(ROOT / "pipeline_model_output.npy", model_out)
-            
-            # Full numerical consistency check
-            print(f"\n=== Model output numerical consistency ===")
-            is_identical = np.allclose(model_out, ref["model_output"], rtol=1e-4, atol=1e-4)
-            if is_identical:
-                print(f"  ✓ Model output is numerically identical to Python reference!")
-            else:
-                diff = np.abs(model_out - ref["model_output"])
-                print(f"  Model output max diff: {diff.max():.6f}, mean diff: {diff.mean():.6f}")
-            
-            # Compare final detection results
-            print(f"\n=== Detection results comparison ===")
-            print(f"Python reference ({len(ref['detections'])} detections):")
-            ref_dets = sorted(ref["detections"], key=lambda x: -x[4])
-            for det in ref_dets:
-                x1, y1, x2, y2, s, c = det
-                print(f"  {ref['names'][c]}: score={s:.4f}, box=[{x1:.1f}, {y1:.1f}, {x2:.1f}, {y2:.1f}]")
-            
-            print(f"\nPipeline output ({len(dets_from_device)} detections):")
-            pipeline_dets = sorted(dets_from_device, key=lambda x: -x[4])
-            for det in pipeline_dets:
-                x1, y1, x2, y2, s, c = det
-                print(f"  {ref['names'][c]}: score={s:.4f}, box=[{x1:.1f}, {y1:.1f}, {x2:.1f}, {y2:.1f}]")
-            
-            # Check if detections match
-            if len(ref_dets) == len(pipeline_dets):
-                all_match = True
-                for i, (r_det, p_det) in enumerate(zip(ref_dets, pipeline_dets)):
-                    rx1, ry1, rx2, ry2, rs, rc = r_det
-                    px1, py1, px2, py2, ps, pc = p_det
-                    score_match = abs(rs - ps) < 0.01
-                    box_match = all(abs(a - b) < 3.0 for a, b in zip([rx1, ry1, rx2, ry2], [px1, py1, px2, py2]))
-                    class_match = rc == pc
-                    if not (score_match and box_match and class_match):
-                        all_match = False
-                print(f"\n=== Final consistency check ===")
-                if all_match:
-                    print(f"  ✓ All {len(ref_dets)} detections match between Python and Pipeline!")
-                else:
-                    print(f"  ✗ Some detections differ (see above)")
-            else:
-                print(f"\n=== Final consistency check ===")
-                print(f"  Detection count differs: Python={len(ref_dets)}, Pipeline={len(pipeline_dets)}")
-        else:
-            print(f"\nmodel_output_raw not found in outputs")
-            print(f"Available outputs: {list(outputs.keys())}")
-    else:
-        print("\nSkipping device run; use --run-device once pipeline is ready.")
+    print("\nDevice execution is handled by pyspatialml run device on packaged pipelines.")
 
 
 if __name__ == "__main__":

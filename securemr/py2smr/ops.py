@@ -19,10 +19,8 @@ record themselves to the current trace context when executed.
 
 from __future__ import annotations
 
-import os
-
 import re
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -82,11 +80,16 @@ def _eval_arithmetic_expression(tensor: np.ndarray, expression: str) -> np.ndarr
 
     Supports expressions like "{0} / 255.0", "{0} + {1}", etc.
     """
-    # Simple single-operand expression
-    expr = expression.replace("{0}", "x")
-    # Use numpy for evaluation
-    x = tensor.astype(np.float32)
-    return eval(expr, {"__builtins__": {}, "x": x, "np": np})
+    tensors = list(tensor) if isinstance(tensor, (list, tuple)) else [tensor]
+    expr = expression
+    env = {"np": np}
+    for index, value in enumerate(tensors):
+        name = f"x{index}"
+        expr = expr.replace("{" + str(index) + "}", name)
+        env[name] = np.asarray(value).astype(np.float32)
+    if "x0" in env:
+        env["x"] = env["x0"]
+    return eval(expr, {"__builtins__": {}}, env)
 
 
 def arithmetic(
@@ -1102,7 +1105,11 @@ def uv_to_3d_in_cam_space(
     Corresponds to EOperatorType.UV_TO_3D_IN_CAM_SPACE.
     """
     _ = (timestamp, camera_matrix, left_image, right_image)
-    uv_flat = np.asarray(uv).reshape(-1, 2)
+    uv_array = np.asarray(uv)
+    if uv_array.size % 2 != 0:
+        uv_flat = np.zeros((1, 2), dtype=np.float32)
+    else:
+        uv_flat = uv_array.reshape(-1, 2)
     result = np.zeros((uv_flat.shape[0], 3), dtype=np.float32)
 
     ctx = get_current_trace()
@@ -1186,136 +1193,70 @@ def run_model_inference(
     output_dtypes: Optional[List[np.dtype]] = None,
     input_aliasing: Optional[Dict[str, str]] = None,
     output_aliasing: Optional[Dict[str, str]] = None,
-    model_type: str = "qnn",
-    model: Optional[Union[str, Dict[str, Any]]] = None,
-    model_id: Optional[str] = None,
+    model_type: str = "tflite",
+    model: Optional[Dict[str, Any]] = None,
     model_target: str = "npu",
     cpu_target_num_threads: int = 1,
-    model_asset: Optional[str] = None,
-    duration: int = 20,
 ) -> Dict[str, np.ndarray]:
-    """Run a model inference using QnnModelV2 on Android device.
+    """Record a LiteRT/TFLite model inference operator.
 
     Corresponds to EOperatorType.RUN_MODEL_INFERENCE.
 
     Args:
         inputs: Dictionary of input tensors.
-        model_file: Path to the model file (.bin with corresponding .json).
+        model_file: Package-relative or local TFLite model path.
         model_name: Name of the model.
         output_names: List of output tensor names.
-        output_shapes: Optional list of output shapes.
-        output_dtypes: Optional list of output dtypes.
+        output_shapes: Required list of output shapes for trace-time placeholder tensors.
+        output_dtypes: Optional list of output dtypes. Defaults to float32.
         input_aliasing: Optional input name aliasing.
         output_aliasing: Optional output name aliasing.
-        model_type: Serialized model runtime type. Use ``litert`` for Pipeline Zoo packages.
-        model: Optional manifest model id or inline model spec to serialize on the operator.
-        model_id: Optional explicit manifest model id to serialize on the operator.
-        model_target: Serialized backend target for Pipeline Zoo packages.
+        model_type: Serialized model runtime type. Only ``tflite`` is supported.
+        model: Optional inline model spec to serialize on the operator.
+        model_target: Serialized backend target for SpatialML packages.
         cpu_target_num_threads: Serialized CPU thread count when ``model_target`` is CPU.
-        model_asset: Optional package-relative model asset path for serialized pipeline specs.
-        duration: Time to wait for model_inspect APK to complete (seconds).
 
     Returns:
-        Dictionary of output tensors.
-
-    Note:
-        Requires Android device connected via ADB and model_inspect APK installed.
+        Dictionary of trace-time placeholder output tensors.
     """
-    from securemr.qnn.qnn_model_v2 import QnnModelV2
-
-    input_list = list(inputs.values())
-    if not input_list:
+    if not inputs:
         raise ValueError("run_model_inference requires at least one input tensor")
+    if model_type != "tflite":
+        raise ValueError("run_model_inference only supports LiteRT/TFLite model_type='tflite'")
+    if not model_file.endswith(".tflite"):
+        raise ValueError(f"Unsupported model format: {model_file}. Use a .tflite model file")
+    if not output_names:
+        raise ValueError("run_model_inference requires at least one output name")
+    if not output_shapes or len(output_shapes) != len(output_names):
+        raise ValueError("run_model_inference requires one output shape per output name")
 
-    # Find JSON file for the model
-    if not model_file.endswith(".bin"):
-        raise ValueError(f"Unsupported model format: {model_file}. Use .bin file for QnnModelV2")
+    output_dtypes = output_dtypes or [np.float32] * len(output_names)
+    if len(output_dtypes) != len(output_names):
+        raise ValueError("run_model_inference requires one output dtype per output name")
 
-    json_path = model_file.replace(".bin", ".json")
-    if not os.path.exists(json_path):
-        # Try alternative naming conventions
-        base_path = model_file.rsplit(".", 1)[0]
-        for suffix in [".json", "_info.json", ".serialized.json"]:
-            candidate = base_path + suffix
-            if os.path.exists(candidate):
-                json_path = candidate
-                break
-    if not os.path.exists(json_path):
-        raise FileNotFoundError(
-            f"JSON file not found for QnnModelV2. Expected: {model_file.replace('.bin', '.json')}"
-        )
-
-    # Create QnnModelV2 instance
-    output_node_ids = ",".join(output_names) if output_names else None
-    model = QnnModelV2(
-        context_binary=model_file,
-        context_binary_json=json_path,
-        output_node_ids=output_node_ids,
-        duration=duration,
-    )
-
-    # Prepare input tensor (convert HWC to NCHW)
-    input_tensor = input_list[0]
-    if input_tensor.ndim == 3:
-        # HWC -> CHW -> NCHW
-        x_np = input_tensor.transpose(2, 0, 1).astype(np.float32)
-        x_np = x_np[np.newaxis, ...]
-    elif input_tensor.ndim == 4:
-        x_np = input_tensor.astype(np.float32)
-    else:
-        raise ValueError(f"Unsupported input tensor rank: {input_tensor.ndim}")
-
-    # Run inference
-    try:
-        model_outputs = model(x_np, is_nhwc=False)
-    except Exception as e:
-        raise RuntimeError(f"QnnModelV2 inference failed: {e}")
-
-    # Handle single output case
-    if not isinstance(model_outputs, (list, tuple)):
-        model_outputs = [model_outputs]
-
-    # Build output dictionary
     outputs: Dict[str, np.ndarray] = {}
-    for idx, name in enumerate(output_names):
-        if idx < len(model_outputs):
-            arr = model_outputs[idx]
-            if hasattr(arr, "numpy"):
-                arr = arr.numpy()
-            else:
-                arr = np.asarray(arr)
+    for name, shape, dtype in zip(output_names, output_shapes, output_dtypes):
+        outputs[name] = np.zeros(tuple(shape), dtype=np.dtype(dtype))
 
-            # Reshape if needed
-            if output_shapes and idx < len(output_shapes):
-                shape = output_shapes[idx]
-                if shape and arr.shape != tuple(shape) and arr.size == int(np.prod(shape)):
-                    arr = arr.reshape(shape)
+    if model is None:
+        model = {
+            "bin_path": model_file,
+            "model_name": model_name,
+            "model_type": "tflite",
+            "model_target": model_target,
+            "cpu_target_num_threads": int(cpu_target_num_threads),
+        }
+    else:
+        model = dict(model)
+        model.setdefault("bin_path", model_file)
+        model.setdefault("model_name", model_name)
+        model.setdefault("model_type", "tflite")
+        model.setdefault("model_target", model_target)
+        model.setdefault("cpu_target_num_threads", int(cpu_target_num_threads))
 
-            # Convert dtype if needed
-            if output_dtypes and idx < len(output_dtypes):
-                try:
-                    dtype = np.dtype(output_dtypes[idx])
-                    if arr.dtype != dtype:
-                        arr = arr.astype(dtype)
-                except Exception:
-                    pass
-
-            outputs[name] = arr
-
-    # Record operation for tracing
     ctx = get_current_trace()
     if ctx is not None:
-        device_model_file = None
-        try:
-            base = model_file.split("/")[-1]
-            device_model_file = (
-                "/sdcard/Android/data/com.bytedance.pico.secure_mr_demo.pipeline_inspect/files/" + base
-            )
-        except Exception:
-            device_model_file = None
         extra_info = {
-            "model_file": model_file,
-            "model_file_host": model_file,
             "model_name": model_name,
             "model_type": model_type,
             "model_target": model_target,
@@ -1323,17 +1264,9 @@ def run_model_inference(
             "input_aliasing": input_aliasing or {},
             "output_aliasing": output_aliasing or {},
             "output_names": output_names,
+            "model": model,
+            "output_shapes": [tuple(shape) for shape in output_shapes],
         }
-        if model is not None:
-            extra_info["model"] = model
-        if model_id is not None:
-            extra_info["model_id"] = model_id
-        if model_asset:
-            extra_info["model_asset"] = model_asset
-        if device_model_file:
-            extra_info["device_model_file"] = device_model_file
-        if output_shapes:
-            extra_info["output_shapes"] = [tuple(shape) for shape in output_shapes]
         ctx.record_op(
             op_type=EOperatorType.RUN_MODEL_INFERENCE,
             attrs=[],

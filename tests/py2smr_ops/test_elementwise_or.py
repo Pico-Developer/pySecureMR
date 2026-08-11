@@ -40,7 +40,7 @@ class TestElementwiseOr:
     @skip_if_no_device
     def test_elementwise_or_on_device(self):
         import pytest
-        pytest.skip("pipeline_inspect produced no output files for elementwise_or (app force-stopped).")
+        pytest.skip("Python verifier device execution is not available")
         @trace(inputs=["a", "b"], outputs=["output"])
         def elementwise_or(a, b):
             return ops.elementwise_or(a, b, output_name="output")

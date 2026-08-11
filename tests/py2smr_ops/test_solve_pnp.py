@@ -54,6 +54,6 @@ def test_solve_pnp_device():
         expected_outputs=expected,
         device=True,
     )
-    if verification.error_message == "Device execution failed":
-        pytest.skip("pipeline_inspect produced no output files; device execution failed")
+    if verification.error_message == "Device verification is not available":
+        pytest.skip("Python verifier device execution is not available")
     assert verification.success

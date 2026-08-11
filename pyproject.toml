@@ -3,19 +3,24 @@ requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "securemr"
+name = "pyspatialml"
 dynamic = ["version"]
-description = "Python bindings for SecureMR."
+description = "SpatialML package and LiteRT/TFLite workflow tools."
 readme = "README.md"
 license = {file = "LICENSE"}
-requires-python = ">=3.10.*"
+requires-python = ">=3.10"
 dependencies = [
+  "ai-edge-litert==2.1.5",
+  "litert-cli==0.1.0",
   "numpy",
   "opencv-python",
   "pure-python-adb",
 ]
 
 [project.optional-dependencies]
+examples = [
+  "onnxruntime",
+]
 test = [
   "coverage",
   "pytest",
@@ -49,21 +54,42 @@ name = "bingwen.ai"
 email = "bingwen.ai@bytedance.com"
 
 [project.urls]
-repository = "https://github.com/Pico-Developer/pySecureMR"
+repository = "https://github.com/Pico-Developer/pySpatialML"
+
+[project.scripts]
+pyspatialml = "pyspatialml.cli:main"
 
 [tool.setuptools]
 zip-safe = false
 include-package-data = true
 packages = {find = {}}
 
+[tool.setuptools.package-data]
+pyspatialml = [
+  "apks/*.apk",
+  "xr_pipeline_runner/**/*.cpp",
+  "xr_pipeline_runner/**/*.gradle",
+  "xr_pipeline_runner/**/*.jar",
+  "xr_pipeline_runner/**/*.kts",
+  "xr_pipeline_runner/**/*.md",
+  "xr_pipeline_runner/**/*.properties",
+  "xr_pipeline_runner/**/*.py",
+  "xr_pipeline_runner/gradlew",
+  "xr_pipeline_runner/gradlew.bat",
+]
+
 [tool.setuptools.dynamic]
 version = {attr = "securemr.__version__"}
 
 [tool.pytest.ini_options]
+testpaths = [
+    "tests",
+]
 norecursedirs = [
     ".git",
     "dist",
     "build",
+    ".cxx",
 ]
 python_files = ["test_*.py"]
 addopts = [

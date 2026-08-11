@@ -41,6 +41,29 @@ class TestAssignment:
         assert verification.success, verification.error_message
         np.testing.assert_allclose(result, src, rtol=1e-5)
 
+    def test_schema_v2_slice_references_host(self):
+        """Test schema-v2 tensor slice references in assignment inputs/outputs."""
+        from securemr.py2smr.verifier import run_pipeline_python
+
+        spec = {
+            "tensors": {
+                "src": {"dimensions": [4, 1], "channels": 1, "data_type": 6, "is_placeholder": True, "usage": 6},
+                "dst": {"dimensions": [4, 1], "channels": 1, "data_type": 6, "is_placeholder": True, "usage": 6},
+                "out": {"dimensions": [4, 1], "channels": 1, "data_type": 6, "is_placeholder": True, "usage": 6},
+            },
+            "operators": [
+                {"type": "assignment", "inputs": ["src[0:1,1:2]"], "outputs": ["dst[0:1,2:3]"]},
+                {"type": "assignment", "inputs": ["dst"], "outputs": ["out"]},
+            ],
+            "inputs": ["src"],
+            "outputs": ["out"],
+        }
+        src = np.array([[1.0, 2.0, 3.0, 4.0]], dtype=np.float32)
+
+        outputs = run_pipeline_python(spec, {"src": src})
+
+        np.testing.assert_array_equal(outputs["out"], np.array([[0.0, 0.0, 2.0, 0.0]], dtype=np.float32))
+
     def test_slice_assignment(self):
         """Test assignment with slicing."""
         @trace(inputs=["src", "dst"], outputs=["output"])

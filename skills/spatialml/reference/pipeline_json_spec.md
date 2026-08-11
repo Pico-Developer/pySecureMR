@@ -123,7 +123,7 @@ Common fields for every operator entry:
 
 | Key        | Type          | Notes |
 |------------|---------------|-------|
-| `type`     | string        | `XR_SECURE_MR_OPERATOR_TYPE_*_PICO` enumerant name; legacy lower-case aliases remain accepted for backward compatibility (`securemr/serialization.py:327-353`, `104-160`). |
+| `type`     | string        | Canonical `XR_SECURE_MR_OPERATOR_TYPE_*_PICO` enumerant name. |
 | `inputs`   | array         | Positional tensor references. Elements may be strings or objects containing a `tensor` key; both forms are accepted by the loader (`serialization.cpp:379-425`). |
 | `outputs`  | array         | Same rules as `inputs`. |
 | `attrs`    | array\<string> (optional) | Raw attribute strings. Python may promote well-known entries to named keys such as `flag`, `expression`, or `threshold` (`securemr/serialization.py:336-353`). |
@@ -269,7 +269,6 @@ Below lists the supported operators observed in the serializers together with th
 - Inputs and outputs must use SecureMR channelized 3D matrix encoding. For an HWC tensor with `dimensions: [H, W]` and `channels: C`, the CHW tensor must be declared as `dimensions: [C, H]` and `channels: W`; the reverse direction uses the inverse mapping.
 - Native binding uses the default unary operator names (`operand` / `result`), not `src` / `dst`.
 - Handy before invoking neural-network runtimes expecting channel-first tensors.
-- Loader supported.
 
 #### `XR_SECURE_MR_OPERATOR_TYPE_INVERSION_PICO` (`inversion`)
 - Uses `Pipeline::inversion` (`XR_SECURE_MR_OPERATOR_TYPE_INVERSION_PICO`) to compute matrix inverses.
@@ -277,11 +276,10 @@ Below lists the supported operators observed in the serializers together with th
 - Ensure the operand is square and invertible; data type should be float per SecureMR guidance.
 - Needs explicit handling in the deserializer because the default code path does not know this type yet.
 
-#### `XR_SECURE_MR_OPERATOR_TYPE_GET_TRANSFORM_MAT_PICO` (`get_transform_mat`; legacy alias `MAKE_TRANSFORM_MAT`)
+#### `XR_SECURE_MR_OPERATOR_TYPE_GET_TRANSFORM_MAT_PICO` (`get_transform_mat`; alias `MAKE_TRANSFORM_MAT`)
 - Backs `Pipeline::transform` for building 4×4 transforms.
 - Provide rotation and translation tensors; `inputs[2]` may optionally carry scale (omit to assume identity).
 - `outputs[0]` becomes a 4×4 float MAT combining the supplied components.
-- Loader supported.
 
 #### `XR_SECURE_MR_OPERATOR_TYPE_LOAD_TEXTURE_PICO` (`load_texture`)
 - Wraps `Pipeline::newTextureToGLTF` (`XR_SECURE_MR_OPERATOR_TYPE_LOAD_TEXTURE_PICO`) to inject textures into GLTF assets.
@@ -334,7 +332,7 @@ Below lists the supported operators observed in the serializers together with th
 - No required inputs; `outputs[0]` receives the depth buffer.
 - Available in both XR and Spatial modes.
 
-#### `XR_SECURE_MR_OPERATOR_TYPE_JAVASCRIPT_PICO` (`javascript`; legacy alias `JS_SCRIPTING`)
+#### `XR_SECURE_MR_OPERATOR_TYPE_JAVASCRIPT_PICO` (`javascript`; alias `JS_SCRIPTING`)
 - Executes a JavaScript snippet to populate output tensors from named inputs.
 - Use `script` or `attrs[0]` for the JavaScript source.
 - `inputs` and `outputs` may use object references with `name` and `tensor` to preserve script-visible aliases.
@@ -352,7 +350,7 @@ Below lists the supported operators observed in the serializers together with th
 
 #### Custom operators
 - Unrecognized `type` values fall back to `PipelineDeserializationOptions::customOperatorHandler` (`serialization.cpp:918-920`). Provide `attrs` or additional keys your handler understands.
-- `name_to_type` in Python tolerates numeric enum values and aliases, making forward compatibility easier (`securemr/serialization.py:103-206`).
+- `name_to_type` in Python tolerates numeric enum values and aliases, supporting custom handlers (`securemr/serialization.py:103-206`).
 
 ## Inputs and Outputs Arrays
 

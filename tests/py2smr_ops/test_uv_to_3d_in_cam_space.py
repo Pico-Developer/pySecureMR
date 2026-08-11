@@ -31,5 +31,18 @@ def test_uv_to_3d_in_cam_space_host():
     assert verification.success
 
 
+def test_uv_to_3d_in_cam_space_malformed_uv_host_defaults():
+    uv = np.zeros((1, 21), dtype=np.float32)
+    timestamp = np.zeros((1, 4), dtype=np.int32)
+    camera_matrix = np.eye(3, dtype=np.float32)
+    left_image = np.zeros((2, 2, 3), dtype=np.uint8)
+    right_image = np.zeros((2, 2, 3), dtype=np.uint8)
+
+    points = ops.uv_to_3d_in_cam_space(uv, timestamp, camera_matrix, left_image, right_image)
+
+    assert points.shape == (1, 3)
+    np.testing.assert_allclose(points, 0.0)
+
+
 def test_uv_to_3d_in_cam_space_device_skip():
     pytest.skip("uv_to_3d_in_cam_space relies on depth sensor data; host stub cannot match device output")

@@ -31,9 +31,9 @@ def test_sort_mat_row_host():
 def test_sort_mat_row_device():
     mat = np.array([[3.0, 1.0, 2.0], [0.0, 5.0, 4.0]], dtype=np.float32)
     verification = _run(mat, traced_sort_mat_row, device=True)
-    if verification.error_message == "Device execution failed":
+    if verification.error_message == "Device verification is not available":
         import pytest
-        pytest.skip("pipeline_inspect produced no output files; device execution failed")
+        pytest.skip("Python verifier device execution is not available")
     assert verification.success
 
 
@@ -47,7 +47,7 @@ def test_sort_mat_col_host():
 def test_sort_mat_col_device():
     mat = np.array([[3.0, 1.0, 2.0], [0.0, 5.0, 4.0]], dtype=np.float32)
     verification = _run(mat, traced_sort_mat_col, device=True)
-    if verification.error_message == "Device execution failed":
+    if verification.error_message == "Device verification is not available":
         import pytest
-        pytest.skip("pipeline_inspect produced no output files; device execution failed")
+        pytest.skip("Python verifier device execution is not available")
     assert verification.success

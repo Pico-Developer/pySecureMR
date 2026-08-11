@@ -40,6 +40,24 @@ def pytest_collection_modifyitems(config, items):  # noqa: D103
         # Skip tests that don't require native bindings
         if "tests/test_inspect.py" in nodeid:
             continue
+        if "tests/test_cli.py" in nodeid:
+            continue
+        if "tests/test_compare_cli.py" in nodeid:
+            continue
+        if "tests/test_pipeline_cli.py" in nodeid:
+            continue
+        if "tests/test_package_cli.py" in nodeid:
+            continue
+        if "tests/test_run_cli.py" in nodeid:
+            continue
+        if "tests/test_model_cli.py" in nodeid:
+            continue
+        if "tests/test_operator_cli.py" in nodeid:
+            continue
+        if "tests/test_pipeline_zoo.py" in nodeid:
+            continue
+        if "tests/test_litert_tools.py" in nodeid:
+            continue
         if "tests/test_py2smr.py" in nodeid:
             continue
         if "tests/py2smr_ops/" in nodeid:

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Helpers for authoring SpatialML Pipeline Zoo packages."""
+"""Helpers for authoring SpatialML packages."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ import json
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, Mapping, Optional, Sequence, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 
 JsonDict = Dict[str, Any]
@@ -29,40 +29,31 @@ SUPPORTED_EXECUTION_MODES = {"xr", "spatial"}
 
 @dataclass(frozen=True)
 class PipelinePackageEntry:
-    """Manifest entry for one pipeline JSON file in a Pipeline Zoo package."""
+    """Manifest entry for one pipeline JSON file in a SpatialML package."""
 
     id: str
     path: str
 
     def to_dict(self) -> JsonDict:
-        """Return the package manifest representation."""
+        """Return the pipeline zoo representation."""
         return {"id": self.id, "path": _normalize_package_path(self.path)}
 
 
 @dataclass(frozen=True)
 class PipelineZooPackageSpec:
-    """Top-level Pipeline Zoo manifest schema."""
+    """Top-level SpatialML manifest schema."""
 
     package_id: str
     pipelines: Sequence[PipelinePackageEntry]
-    display_name: Optional[str] = None
-    task: Optional[str] = None
     supported_modes: Sequence[str] = field(default_factory=tuple)
-    labels: Sequence[str] = field(default_factory=list)
     runtime: Mapping[str, Any] = field(default_factory=dict)
     schema_version: str = "2"
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def to_manifest_dict(self) -> JsonDict:
-        """Return a manifest dictionary matching the Pipeline Zoo package schema."""
+        """Return a manifest dictionary matching the SpatialML package schema."""
         manifest: JsonDict = {"schema_version": self.schema_version, "id": self.package_id}
-        if self.task:
-            manifest["task"] = self.task
-        if self.display_name:
-            manifest["display_name"] = self.display_name
         manifest["pipelines"] = [entry.to_dict() for entry in self.pipelines]
-        if self.labels:
-            manifest["labels"] = list(self.labels)
         runtime = dict(self.runtime)
         if self.supported_modes:
             runtime["supported_modes"] = _normalize_supported_modes(self.supported_modes)
@@ -164,7 +155,7 @@ def write_pipeline_zoo_package(
     assets: Optional[Mapping[str, PathLike]] = None,
     indent: int = 2,
 ) -> JsonDict:
-    """Write a SpatialML Pipeline Zoo package directory.
+    """Write a SpatialML package directory.
 
     The generated layout follows the package schema: ``manifest.json`` at the
     package root, package-relative pipeline paths, and binary assets copied
@@ -193,7 +184,7 @@ def write_pipeline_zoo_package(
 
 
 def load_pipeline_zoo_manifest(path: PathLike) -> JsonDict:
-    """Load and minimally validate a Pipeline Zoo ``manifest.json`` file."""
+    """Load and minimally validate a SpatialML ``manifest.json`` file."""
     manifest_path = Path(path)
     if manifest_path.is_dir():
         manifest_path = manifest_path / "manifest.json"
@@ -204,22 +195,22 @@ def load_pipeline_zoo_manifest(path: PathLike) -> JsonDict:
 
 
 def validate_pipeline_zoo_manifest(manifest: Mapping[str, Any]) -> None:
-    """Validate the manifest fields required by the Pipeline Zoo package schema."""
+    """Validate the manifest fields required by the SpatialML package schema."""
     required = ["id", "pipelines"]
     missing = [key for key in required if key not in manifest]
     if missing:
-        raise ValueError(f"Pipeline Zoo manifest missing required fields: {', '.join(missing)}")
+        raise ValueError(f"SpatialML manifest missing required fields: {', '.join(missing)}")
     if str(manifest.get("schema_version", "")) != "2":
-        raise ValueError("Pipeline Zoo manifest schema_version must be 2")
+        raise ValueError("SpatialML manifest schema_version must be 2")
     if not isinstance(manifest["pipelines"], list) or not manifest["pipelines"]:
-        raise ValueError("Pipeline Zoo manifest requires a non-empty 'pipelines' list")
+        raise ValueError("SpatialML manifest requires a non-empty 'pipelines' list")
     for index, pipeline in enumerate(manifest["pipelines"]):
         if not isinstance(pipeline, Mapping) or not pipeline.get("id") or not pipeline.get("path"):
-            raise ValueError(f"Pipeline Zoo manifest pipeline #{index} requires 'id' and 'path'")
+            raise ValueError(f"SpatialML manifest pipeline #{index} requires 'id' and 'path'")
         _normalize_package_path(str(pipeline["path"]))
     runtime = manifest.get("runtime", {})
     if runtime and not isinstance(runtime, Mapping):
-        raise ValueError("Pipeline Zoo manifest 'runtime' must be an object when present")
+        raise ValueError("SpatialML manifest 'runtime' must be an object when present")
     supported_modes = runtime.get("supported_modes", []) if runtime else []
     if supported_modes:
         _normalize_supported_modes(supported_modes)

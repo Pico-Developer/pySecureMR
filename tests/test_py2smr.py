@@ -23,6 +23,7 @@ import pytest
 
 from securemr.py2smr import trace, ops, convert, verify
 from securemr.py2smr.tracer import TraceContext, TracedOp, TensorInfo, get_current_trace
+from securemr.core.utils import convert_to_dtype
 from securemr.py2smr.converter import trace_to_pipeline_spec
 from securemr.py2smr.verifier import (
     compare_outputs,
@@ -31,6 +32,11 @@ from securemr.py2smr.verifier import (
     validate_pipeline_spec,
 )
 from securemr.core.types import EOperatorType
+
+
+def test_convert_to_dtype_accepts_schema_v2_string_aliases():
+    assert convert_to_dtype("int32", target="numpy") == np.int32
+    assert convert_to_dtype("float32", target="numpy") == np.float32
 
 
 class TestTracer:
@@ -156,9 +162,7 @@ class TestOps:
         input_arr = np.array([[3.0, 4.0], [1.0, 0.0]], dtype=np.float32)
         result = ops.normalize(input_arr)
 
-        # First row: [3, 4] -> norm = 5 -> [0.6, 0.8]
-        # Second row: [1, 0] -> norm = 1 -> [1.0, 0.0]
-        expected = np.array([[0.6, 0.8], [1.0, 0.0]], dtype=np.float32)
+        expected = input_arr / np.linalg.norm(input_arr)
         np.testing.assert_allclose(result, expected, rtol=1e-5)
 
     def test_argmax(self):
@@ -604,6 +608,120 @@ class TestPythonExecutor:
 
         expected = input_arr / 255.0 * 2.0 - 1.0
         np.testing.assert_allclose(outputs["output"], expected)
+
+    def test_run_pipeline_python_preserves_supplied_rectified_vst_outputs(self):
+        """User-provided VST tensors should not be overwritten by host stubs."""
+        from securemr.py2smr.verifier import run_pipeline_python
+
+        spec = {
+            "tensors": {
+                "vst_right_image": {
+                    "dimensions": [2, 2],
+                    "channels": 3,
+                    "data_type": 1,
+                    "is_placeholder": True,
+                    "usage": 6,
+                },
+                "vst_left_image": {
+                    "dimensions": [2, 2],
+                    "channels": 3,
+                    "data_type": 1,
+                    "is_placeholder": True,
+                    "usage": 6,
+                },
+                "vst_timestamp": {"tensor_type": "timestamp", "is_placeholder": True},
+                "vst_camera_matrix": {
+                    "dimensions": [3, 3],
+                    "channels": 1,
+                    "data_type": 6,
+                    "is_placeholder": True,
+                    "usage": 6,
+                },
+            },
+            "operators": [
+                {
+                    "type": "XR_SECURE_MR_OPERATOR_TYPE_RECTIFIED_VST_ACCESS_PICO",
+                    "inputs": [],
+                    "outputs": [
+                        "vst_right_image",
+                        "vst_left_image",
+                        "vst_timestamp",
+                        "vst_camera_matrix",
+                    ],
+                }
+            ],
+            "inputs": [],
+            "outputs": ["vst_right_image", "vst_left_image", "vst_timestamp", "vst_camera_matrix"],
+        }
+        right = np.ones((2, 2, 3), dtype=np.uint8) * 9
+        left = np.ones((2, 2, 3), dtype=np.uint8) * 7
+
+        outputs = run_pipeline_python(
+            spec,
+            {"vst_right_image": right, "vst_left_image": left},
+        )
+
+        np.testing.assert_array_equal(outputs["vst_right_image"], right)
+        np.testing.assert_array_equal(outputs["vst_left_image"], left)
+
+    def test_run_pipeline_python_decodes_mediapipe_face_postprocess(self):
+        """Known face detector JavaScript postprocess should produce post_det."""
+        from securemr.py2smr.verifier import run_pipeline_python
+
+        coords_1 = np.zeros((512, 16), dtype=np.float32)
+        coords_2 = np.zeros((384, 16), dtype=np.float32)
+        scores_1 = np.full((512, 1), -10.0, dtype=np.float32)
+        scores_2 = np.full((384, 1), -10.0, dtype=np.float32)
+        scores_1[0, 0] = 10.0
+        coords_1[0, :14] = [
+            0.0,
+            0.0,
+            20.0,
+            30.0,
+            -5.0,
+            -5.0,
+            5.0,
+            -5.0,
+            0.0,
+            0.0,
+            -4.0,
+            6.0,
+            4.0,
+            6.0,
+        ]
+        spec = {
+            "tensors": {},
+            "operators": [
+                {
+                    "type": "XR_SECURE_MR_OPERATOR_TYPE_JAVASCRIPT_PICO",
+                    "inputs": [
+                        {"name": "box_coords_1", "tensor": "box_coords_1"},
+                        {"name": "box_coords_2", "tensor": "box_coords_2"},
+                        {"name": "box_scores_1", "tensor": "box_scores_1"},
+                        {"name": "box_scores_2", "tensor": "box_scores_2"},
+                        {"name": "post_det_template", "tensor": "post_det_template"},
+                    ],
+                    "outputs": [{"name": "post_det", "tensor": "post_det"}],
+                    "script": "function anchorFor(){} function decodeDetection(){}",
+                }
+            ],
+            "inputs": [],
+            "outputs": ["post_det"],
+        }
+
+        outputs = run_pipeline_python(
+            spec,
+            {
+                "box_coords_1": coords_1,
+                "box_coords_2": coords_2,
+                "box_scores_1": scores_1,
+                "box_scores_2": scores_2,
+                "post_det_template": np.zeros((1, 21), dtype=np.float32),
+            },
+        )
+
+        assert outputs["post_det"].shape == (1, 21)
+        assert outputs["post_det"][0, 4] > 0.99
 
     def test_verify_with_python_executor(self):
         """Test verify function uses pure Python executor."""

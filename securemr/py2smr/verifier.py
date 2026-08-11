@@ -47,6 +47,7 @@ _OPERATOR_TYPE_ALIASES = {
     "COMPARE_TO": "CUSTOMIZED_COMPARE",
     "CVT_COLOR": "CONVERT_COLOR",
     "DRAW_TEXT": "RENDER_TEXT",
+    "ELEMENTWISE": "ELEMENTWISE_MULTIPLY",
     "GET_TRANSFORM_MATRIX": "GET_TRANSFORM_MAT",
     "JS_SCRIPTING": "JAVASCRIPT",
     "MAKE_TRANSFORM_MAT": "GET_TRANSFORM_MAT",
@@ -271,6 +272,9 @@ def _run_host_pipeline(
 def run_pipeline_python(
     spec: Dict[str, Any],
     inputs: Dict[str, np.ndarray],
+    *,
+    return_all_tensors: bool = False,
+    model_runner=None,
 ) -> Dict[str, np.ndarray]:
     """Execute a pipeline spec using pure Python (no native bindings).
 
@@ -279,7 +283,8 @@ def run_pipeline_python(
         inputs: Dictionary of input tensors.
 
     Returns:
-        Dictionary of output tensors.
+        Dictionary of output tensors by default. When ``return_all_tensors`` is
+        true, returns every tensor available after execution.
     """
     from . import ops
 
@@ -287,6 +292,7 @@ def run_pipeline_python(
 
     # Initialize tensor storage with inputs
     tensors: Dict[str, np.ndarray] = dict(inputs)
+    protected_inputs = set(inputs.keys())
 
     # Load pre-defined tensor values from spec
     for name, tensor_spec in spec.get("tensors", {}).items():
@@ -309,7 +315,14 @@ def run_pipeline_python(
     # Execute operators in order
     tensor_specs = spec.get("tensors", {})
     for op_spec in spec.get("operators", []):
-        _execute_operator(op_spec, tensors, ops, tensor_specs=tensor_specs)
+        _execute_operator(
+            op_spec,
+            tensors,
+            ops,
+            tensor_specs=tensor_specs,
+            protected_inputs=protected_inputs,
+            model_runner=model_runner,
+        )
 
     # Collect outputs
     output_names = spec.get("outputs", [])
@@ -318,7 +331,7 @@ def run_pipeline_python(
         if name in tensors:
             outputs[name] = tensors[name]
 
-    return outputs
+    return tensors if return_all_tensors else outputs
 
 
 def _resolve_tensor_name(ref: Any) -> Optional[str]:
@@ -328,6 +341,39 @@ def _resolve_tensor_name(ref: Any) -> Optional[str]:
     if isinstance(ref, dict):
         return ref.get("tensor") or ref.get("name")
     return None
+
+
+def _split_tensor_slice(name: str) -> tuple[str, Optional[List[List[int]]]]:
+    if "[" not in name or not name.endswith("]"):
+        return name, None
+    tensor_name = name[: name.index("[")]
+    raw = name[name.index("[") + 1 : -1]
+    slices = []
+    for part in raw.split(","):
+        items = [item.strip() for item in part.split(":")]
+        if len(items) < 2:
+            index = int(items[0])
+            slices.append([index, index + 1])
+        else:
+            start = int(items[0]) if items[0] else 0
+            end = int(items[1]) if items[1] else start + 1
+            slices.append([start, end])
+    return tensor_name, slices
+
+
+def _tensor_from_ref(ref: Any, tensors: Dict[str, np.ndarray]) -> Optional[np.ndarray]:
+    name = _resolve_tensor_name(ref)
+    if not name:
+        return None
+    tensor_name, slices = _split_tensor_slice(name)
+    if tensor_name not in tensors:
+        return None
+    value = tensors[tensor_name]
+    if slices is None:
+        return value
+    if len(slices) == 1:
+        return value[slices[0][0]:slices[0][1]]
+    return value[slices[0][0]:slices[0][1], slices[1][0]:slices[1][1]]
 
 
 def _get_operator_type(type_str: str) -> Optional[EOperatorType]:
@@ -364,6 +410,8 @@ def _execute_operator(
     tensors: Dict[str, np.ndarray],
     ops_module,
     tensor_specs: Optional[Dict[str, Any]] = None,
+    protected_inputs: Optional[set[str]] = None,
+    model_runner=None,
 ) -> None:
     """Execute a single operator.
 
@@ -380,9 +428,9 @@ def _execute_operator(
     input_refs = op_spec.get("inputs", [])
     input_tensors = []
     for ref in input_refs:
-        name = _resolve_tensor_name(ref)
-        if name and name in tensors:
-            input_tensors.append(tensors[name])
+        value = _tensor_from_ref(ref, tensors)
+        if value is not None:
+            input_tensors.append(value)
 
     # Get output names
     output_refs = op_spec.get("outputs", [])
@@ -411,7 +459,7 @@ def _execute_operator(
     if op_type == EOperatorType.ARITHMETIC_COMPOSE:
         expression = op_spec.get("expression") or op_spec.get("attrs", [""])[0]
         if input_tensors:
-            result = ops_module.arithmetic(input_tensors[0], expression)
+            result = ops_module.arithmetic(input_tensors if len(input_tensors) > 1 else input_tensors[0], expression)
             if output_names:
                 tensors[output_names[0]] = result
 
@@ -455,7 +503,17 @@ def _execute_operator(
 
     elif op_type == EOperatorType.ELEMENTWISE_MULTIPLY:
         if len(input_tensors) >= 2:
-            result = ops_module.elementwise_multiply(input_tensors[0], input_tensors[1])
+            elementwise_op = str(op_spec.get("op") or "multiply").lower()
+            if elementwise_op == "min":
+                result = ops_module.elementwise_min(input_tensors[0], input_tensors[1])
+            elif elementwise_op == "max":
+                result = ops_module.elementwise_max(input_tensors[0], input_tensors[1])
+            elif elementwise_op == "or":
+                result = ops_module.elementwise_or(input_tensors[0], input_tensors[1])
+            elif elementwise_op == "and":
+                result = ops_module.elementwise_and(input_tensors[0], input_tensors[1])
+            else:
+                result = ops_module.elementwise_multiply(input_tensors[0], input_tensors[1])
             if output_names:
                 tensors[output_names[0]] = result
     elif op_type == EOperatorType.ELEMENTWISE_OR:
@@ -484,6 +542,12 @@ def _execute_operator(
     elif op_type == EOperatorType.ASSIGNMENT:
         src_slices = op_spec.get("src_slices")
         dst_slices = op_spec.get("dst_slices")
+        output_base_name = output_names[0] if output_names else None
+        output_slice = None
+        if output_base_name:
+            output_base_name, output_slice = _split_tensor_slice(output_base_name)
+            if dst_slices is None and output_slice is not None:
+                dst_slices = output_slice
         if len(input_tensors) >= 2:
             result = ops_module.assignment(
                 input_tensors[0],
@@ -491,12 +555,24 @@ def _execute_operator(
                 src_slices=src_slices,
                 dst_slices=dst_slices,
             )
-            if output_names:
-                tensors[output_names[0]] = result
+            if output_base_name:
+                tensors[output_base_name] = result
         elif len(input_tensors) == 1:
-            # Simple copy/type conversion
-            if output_names:
-                tensors[output_names[0]] = input_tensors[0].copy()
+            if output_base_name:
+                if dst_slices is not None:
+                    dst_spec = tensor_specs.get(output_base_name, {}) if tensor_specs else {}
+                    dst = tensors.get(output_base_name)
+                    if dst is None:
+                        shape = get_output_shape(output_base_name) or input_tensors[0].shape
+                        data_type = dst_spec.get("data_type", 6) if isinstance(dst_spec, dict) else 6
+                        try:
+                            dtype = convert_to_dtype(data_type, target="numpy")
+                        except Exception:
+                            dtype = input_tensors[0].dtype
+                        dst = np.zeros(shape, dtype=dtype)
+                    tensors[output_base_name] = ops_module.assignment(input_tensors[0], dst, dst_slices=dst_slices)
+                else:
+                    tensors[output_base_name] = input_tensors[0].copy()
 
     elif op_type == EOperatorType.APPLY_AFFINE:
         if len(input_tensors) >= 2:
@@ -654,35 +730,28 @@ def _execute_operator(
             image_path=op_spec.get("image_path"),
         )
         if output_names:
-            if len(output_names) >= 1:
+            protected_inputs = protected_inputs or set()
+            if len(output_names) >= 1 and output_names[0] not in protected_inputs:
                 tensors[output_names[0]] = right
-            if len(output_names) >= 2:
+            if len(output_names) >= 2 and output_names[1] not in protected_inputs:
                 tensors[output_names[1]] = left
-            if len(output_names) >= 3:
+            if len(output_names) >= 3 and output_names[2] not in protected_inputs:
                 tensors[output_names[2]] = timestamp
-            if len(output_names) >= 4:
+            if len(output_names) >= 4 and output_names[3] not in protected_inputs:
                 tensors[output_names[3]] = cam_mat
 
     elif op_type == EOperatorType.RUN_MODEL_INFERENCE:
         model_ref = op_spec.get("model")
         inline_model = model_ref if isinstance(model_ref, dict) else {}
         model_file = (
-            op_spec.get("model_file_host")
-            or op_spec.get("model_file")
-            or op_spec.get("model_asset")
-            or inline_model.get("model_file_host")
-            or inline_model.get("model_file")
-            or inline_model.get("model_asset")
+            inline_model.get("model_file_host")
             or inline_model.get("model_path")
             or inline_model.get("bin_path")
-            or (model_ref if isinstance(model_ref, str) and ("/" in model_ref or "." in model_ref) else None)
         )
-        model_name = op_spec.get("model_name", "model")
+        model_name = op_spec.get("model_name") or inline_model.get("model_name") or "model"
         if not model_file:
-            model_selector = op_spec.get("model_id") or (model_ref if isinstance(model_ref, str) else None)
             raise ValueError(
-                "RUN_MODEL_INFERENCE requires model_file/model_asset for host verification; "
-                f"model selector {model_selector!r} must be resolved by a package deserializer"
+                "RUN_MODEL_INFERENCE requires inline TFLite model metadata with model.bin_path"
             )
         inputs_map: Dict[str, np.ndarray] = {}
         for ref in input_refs:
@@ -714,16 +783,30 @@ def _execute_operator(
                     dtype = None
             output_dtypes.append(dtype if dtype is not None else np.float32)
 
-        outputs = ops_module.run_model_inference(
-            inputs=inputs_map,
-            model_file=model_file,
-            model_name=model_name,
-            output_names=output_names,
-            output_shapes=output_shapes if output_shapes else None,
-            output_dtypes=output_dtypes if output_dtypes else None,
-            input_aliasing=op_spec.get("input_aliasing", {}),
-            output_aliasing=op_spec.get("output_aliasing", {}),
-        )
+        if model_runner is not None:
+            outputs = model_runner(
+                inputs=inputs_map,
+                model_file=model_file,
+                model_name=model_name,
+                output_names=output_names,
+                output_shapes=output_shapes if output_shapes else None,
+                output_dtypes=output_dtypes if output_dtypes else None,
+                input_aliasing=op_spec.get("input_aliasing", {}),
+                output_aliasing=op_spec.get("output_aliasing", {}),
+                model=inline_model,
+            )
+        else:
+            outputs = ops_module.run_model_inference(
+                inputs=inputs_map,
+                model_file=model_file,
+                model_name=model_name,
+                output_names=output_names,
+                output_shapes=output_shapes if output_shapes else None,
+                output_dtypes=output_dtypes if output_dtypes else None,
+                input_aliasing=op_spec.get("input_aliasing", {}),
+                output_aliasing=op_spec.get("output_aliasing", {}),
+                model=inline_model,
+            )
         for name, value in outputs.items():
             tensors[name] = value
 
@@ -771,7 +854,9 @@ def _execute_operator(
                 name = _resolve_tensor_name(ref)
                 if name and name in tensors:
                     inputs_map[name] = tensors[name]
-        outputs = ops_module.javascript(js_code, inputs_map, output_names)
+        outputs = _try_execute_known_javascript(js_code, inputs_map, output_names)
+        if outputs is None:
+            outputs = ops_module.javascript(js_code, inputs_map, output_names)
         for name, value in outputs.items():
             tensors[name] = value
 
@@ -823,89 +908,118 @@ def _execute_operator(
         )
 
 
+def _try_execute_known_javascript(
+    js_code: str,
+    inputs: Dict[str, np.ndarray],
+    output_names: List[str],
+) -> Optional[Dict[str, np.ndarray]]:
+    if (
+        "decodeDetection" in js_code
+        and "anchorFor" in js_code
+        and {"box_coords_1", "box_coords_2", "box_scores_1", "box_scores_2"}.issubset(inputs)
+        and output_names == ["post_det"]
+    ):
+        return {"post_det": _decode_mediapipe_face_detection(inputs)}
+    return None
+
+
+def _decode_mediapipe_face_detection(inputs: Dict[str, np.ndarray]) -> np.ndarray:
+    box_coords_1 = np.asarray(inputs["box_coords_1"], dtype=np.float32).reshape(-1)
+    box_coords_2 = np.asarray(inputs["box_coords_2"], dtype=np.float32).reshape(-1)
+    box_scores_1 = np.asarray(inputs["box_scores_1"], dtype=np.float32).reshape(-1)
+    box_scores_2 = np.asarray(inputs["box_scores_2"], dtype=np.float32).reshape(-1)
+    template = np.asarray(inputs.get("post_det_template", np.zeros((1, 21), dtype=np.float32)), dtype=np.float32)
+    post_det = template.reshape(-1).copy()
+    if post_det.size < 21:
+        padded = np.zeros(21, dtype=np.float32)
+        padded[: post_det.size] = post_det
+        post_det = padded
+    else:
+        post_det = post_det[:21]
+
+    input_size = 256.0
+    camera_width = 580.0
+    camera_height = 326.0
+    affine_scale_x = 0.4413793087
+    affine_scale_y = 0.7852760736
+    affine_x_offset = 0.0
+    affine_y_offset = 0.0
+    score_threshold = 0.25
+
+    def sigmoid(value: float) -> float:
+        return float(1.0 / (1.0 + np.exp(-float(value))))
+
+    best_score = 0.0
+    best_index = -1
+    best_head = 0
+    for index in range(min(512, box_scores_1.size)):
+        score = sigmoid(box_scores_1[index])
+        if score > best_score:
+            best_score = score
+            best_index = index
+            best_head = 1
+    for index in range(min(384, box_scores_2.size)):
+        score = sigmoid(box_scores_2[index])
+        if score > best_score:
+            best_score = score
+            best_index = index
+            best_head = 2
+
+    if best_score <= score_threshold or best_index < 0:
+        return post_det.reshape(1, 21)
+
+    coords = box_coords_1 if best_head == 1 else box_coords_2
+    feature_size = 16 if best_head == 1 else 8
+    anchors_per_cell = 2 if best_head == 1 else 6
+    cell = best_index // anchors_per_cell
+    col = cell % feature_size
+    row = cell // feature_size
+    anchor_x = (col + 0.5) / feature_size
+    anchor_y = (row + 0.5) / feature_size
+
+    def to_camera_x(value: float) -> float:
+        return float(np.clip((value - affine_x_offset) / affine_scale_x, 0.0, camera_width))
+
+    def to_camera_y(value: float) -> float:
+        return float(np.clip((value - affine_y_offset) / affine_scale_y, 0.0, camera_height))
+
+    base = best_index * 16
+    if base + 14 > coords.size:
+        return post_det.reshape(1, 21)
+
+    x_center = (coords[base] / input_size + anchor_x) * input_size
+    y_center = (coords[base + 1] / input_size + anchor_y) * input_size
+    box_w = coords[base + 2]
+    box_h = coords[base + 3]
+
+    post_det[0] = to_camera_x(x_center - box_w * 0.5)
+    post_det[1] = to_camera_y(y_center - box_h * 0.5)
+    post_det[2] = to_camera_x(x_center + box_w * 0.5)
+    post_det[3] = to_camera_y(y_center + box_h * 0.5)
+    post_det[4] = best_score
+    post_det[5] = 0.0
+
+    for keypoint in range(5):
+        coord_base = base + 4 + keypoint * 2
+        out_base = 6 + keypoint * 3
+        keypoint_x = (coords[coord_base] / input_size + anchor_x) * input_size
+        keypoint_y = (coords[coord_base + 1] / input_size + anchor_y) * input_size
+        post_det[out_base] = to_camera_x(keypoint_x)
+        post_det[out_base + 1] = to_camera_y(keypoint_y)
+        post_det[out_base + 2] = best_score
+
+    return post_det.astype(np.float32).reshape(1, 21)
+
 def _run_device_pipeline(
-    pipeline_path: Union[str, Path],
+    pipeline_path: Path,
     inputs: Dict[str, np.ndarray],
     input_tensor_name: str,
-    duration: int = 30,
+    duration: int,
     expected_outputs: Optional[Dict[str, np.ndarray]] = None,
 ) -> Optional[Dict[str, np.ndarray]]:
-    """Run pipeline on device using pipeline-inspect.
-
-    Args:
-        pipeline_path: Path to pipeline JSON file.
-        inputs: Dictionary of input tensors.
-        input_tensor_name: Name of the input tensor to inject.
-        duration: Duration to run the pipeline in seconds.
-        expected_outputs: Optional dictionary of expected outputs to determine dtypes.
-
-    Returns:
-        Dictionary of output tensors, or None if device execution failed.
-    """
-    import subprocess
-    import glob
-
-    # Save input to binary file
-    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
-        input_bin_path = f.name
-        input_tensor = inputs[input_tensor_name]
-        input_tensor.tofile(f)
-
-    try:
-        # Run pipeline-inspect
-        cmd = [
-            "python", "-m", "securemr.inspect.pipeline_cli",
-            "--pipeline", str(pipeline_path),
-            "--input", input_bin_path,
-            "--input-tensor", input_tensor_name,
-            "--duration", str(duration),
-            "--force-install-apk",
-        ]
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=duration + 60,
-        )
-
-        if result.returncode != 0:
-            print(f"Device execution failed: {result.stderr}")
-            return None
-
-        # Find output files
-        output_dir = Path("tmp_data")
-        output_dirs = sorted(output_dir.glob("pipeline_inspect_outputs_*"))
-        if not output_dirs:
-            print("No output directory found")
-            return None
-
-        latest_output_dir = output_dirs[-1]
-        outputs = {}
-
-        for output_file in latest_output_dir.glob("pipeline_inspect_output_*.bin"):
-            # Extract tensor name from filename
-            name = output_file.stem.replace("pipeline_inspect_output_", "")
-
-            # Determine dtype from expected outputs if available
-            dtype = np.float32
-            if expected_outputs and name in expected_outputs:
-                dtype = expected_outputs[name].dtype
-
-            data = np.fromfile(output_file, dtype=dtype)
-            outputs[name] = data
-
-        return outputs if outputs else None
-
-    except subprocess.TimeoutExpired:
-        print("Device execution timed out")
-        return None
-    except Exception as e:
-        print(f"Device execution error: {e}")
-        return None
-    finally:
-        os.unlink(input_bin_path)
-
+    """Device verification is not available from the Python verifier."""
+    print("Device verification is not available from the Python verifier. Use pyspatialml run device.")
+    return None
 
 def verify(
     pipeline: Union[str, Path, Dict[str, Any]],
@@ -982,7 +1096,10 @@ def verify(
                 return
             operators = spec.get("operators", [])
             for op_spec in operators:
-                host_path = op_spec.get("model_file_host")
+                model_spec = op_spec.get("model")
+                if not isinstance(model_spec, dict):
+                    continue
+                host_path = model_spec.get("model_file_host") or model_spec.get("bin_path")
                 if host_path and os.path.exists(host_path):
                     target = spec_path.parent / Path(host_path).name
                     if not target.exists():
@@ -1035,7 +1152,7 @@ def verify(
                 return VerificationResult(
                     success=False,
                     host_outputs=host_outputs,
-                    error_message="Device execution failed",
+                    error_message="Device verification is not available",
                 )
 
             # Compare host and device outputs

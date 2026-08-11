@@ -37,11 +37,8 @@ def test_write_pipeline_zoo_package_writes_manifest_and_assets(tmp_path):
     model_file.write_bytes(b"model")
     package = PipelineZooPackageSpec(
         package_id="face",
-        display_name="Face",
-        task="face_detection",
         supported_modes=["xr", "spatial", "xr"],
         pipelines=[PipelinePackageEntry("detection", "pipeline/face_detection_pipeline.json")],
-        labels=["face"],
         runtime={"detection_tensor": "detections"},
     )
     pipeline = {
@@ -66,6 +63,9 @@ def test_write_pipeline_zoo_package_writes_manifest_and_assets(tmp_path):
 
     assert manifest["schema_version"] == "2"
     assert manifest["runtime"]["supported_modes"] == ["xr", "spatial"]
+    assert "display_name" not in manifest
+    assert "task" not in manifest
+    assert "labels" not in manifest
     assert "model" not in manifest
     assert "models" not in manifest
     assert (tmp_path / "pkg" / "manifest.json").exists()
@@ -108,19 +108,19 @@ def test_configure_litert_inference_operator_requires_inline_model():
         )
 
 
-def test_validate_pipeline_zoo_manifest_rejects_path_traversal():
+def test_validate_pipeline_zoo_rejects_path_traversal():
     with pytest.raises(ValueError, match="Invalid package-relative path"):
         validate_pipeline_zoo_manifest(
             {"schema_version": "2", "id": "bad", "pipelines": [{"id": "p", "path": "../pipeline.json"}]}
         )
 
 
-def test_validate_pipeline_zoo_manifest_requires_schema_v2():
+def test_validate_pipeline_zoo_requires_schema_v2():
     with pytest.raises(ValueError, match="schema_version must be 2"):
         validate_pipeline_zoo_manifest({"schema_version": "1.0", "id": "bad", "pipelines": []})
 
 
-def test_validate_pipeline_zoo_manifest_rejects_unknown_execution_mode():
+def test_validate_pipeline_zoo_rejects_unknown_execution_mode():
     with pytest.raises(ValueError, match="Unsupported execution mode"):
         validate_pipeline_zoo_manifest(
             {

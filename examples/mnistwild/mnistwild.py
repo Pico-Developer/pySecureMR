@@ -15,22 +15,19 @@
 """Example implementation of MNIST classification in the wild."""
 
 import json
-import os
 import pathlib
 import cv2
 import numpy as np
 import securemr as smr
+from securemr.pipeline_zoo import create_litert_model_spec
 from securemr.core.utils import convert_from_dtype, mat_flag, type_to_name
 from securemr.py2smr import trace, ops, convert
 from securemr.py2smr.tracer import get_current_trace
 from securemr.py2smr.verifier import run_pipeline_python
-from securemr.qnn.qnn_model_v2 import QnnModelV2
 
 ROOT = pathlib.Path(__file__).parent.resolve()
-PIPE_JSON = str(ROOT / "mnist_pipeline_qnn237.json")
-QNN237_DIR = ROOT / "qnn237"
-QNN237_MODEL_BIN = QNN237_DIR / "model.serialized.bin"
-QNN237_MODEL_JSON = QNN237_DIR / "model.serialized.json"
+PIPE_JSON = str(ROOT / "mnist_pipeline.json")
+MODEL_ASSET = "model/mnist.tflite"
 
 IMAGE_WIDTH = 3248
 IMAGE_HEIGHT = 2464
@@ -144,19 +141,9 @@ def preprocess_pipeline(image_path: str, output_path: str):
     return normalized, spec
 
 
-def _load_qnn237_meta():
-    with open(QNN237_MODEL_JSON, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    info = data["info"]["graphs"][0]["info"]
-    inputs = [t["info"]["name"] for t in info["graphInputs"]]
-    outputs = [t["info"]["name"] for t in info["graphOutputs"]]
-    name = info.get("graphName", "model")
-    return inputs, outputs, name
-
-
 def _add_vst_and_model_ops(
     spec: dict,
-    model_asset: str,
+    model_path: str,
     model_input_name: str,
     model_output_names,
     model_name: str,
@@ -240,7 +227,33 @@ def _add_vst_and_model_ops(
             {"name": model_output_names[0], "tensor": "predicted_score"},
             {"name": model_output_names[1], "tensor": "predicted_class"},
         ],
-        "model_asset": model_asset,
+        "model": create_litert_model_spec(
+            model_path,
+            model_name,
+            input_tensors=[
+                {
+                    "name": model_input_name,
+                    "shape": [1, CROP_HEIGHT, CROP_WIDTH, 1],
+                    "encoding_type": "FP32",
+                    "alias_name": "normalized_input_tensor",
+                }
+            ],
+            output_tensors=[
+                {
+                    "name": model_output_names[0],
+                    "shape": [1],
+                    "encoding_type": "FP32",
+                    "alias_name": "predicted_score",
+                },
+                {
+                    "name": model_output_names[1],
+                    "shape": [1],
+                    "encoding_type": "INT32",
+                    "alias_name": "predicted_class",
+                },
+            ],
+        ),
+        "model_type": "tflite",
         "model_name": model_name,
     }
     operators.append(model_op)
@@ -268,36 +281,19 @@ def main():
     x2 = run_pipeline_python(preprocess_spec, {"image": cv2.imread(str(test_image))})["normalized_input_tensor"]
     assert np.allclose(x, x2, rtol=1e-4, atol=1e-4)
 
-    context_binary_file = QNN237_MODEL_BIN
-    model_inputs, model_outputs, model_name = _load_qnn237_meta()
-    if len(model_outputs) < 2:
-        raise ValueError(f"Expected at least 2 model outputs, got: {model_outputs}")
-    model = QnnModelV2(
-        context_binary=str(context_binary_file),
-        context_binary_json=str(QNN237_MODEL_JSON),
-        output_node_ids=",".join(model_outputs),
-        duration=20,
-    )
-    # # You can also run QnnModel on android device, but ROOT is required
-    # model = smr.QnnModel(context_binary_file, "android", name="mnistwild_test")
-
-    x = x[None, :, :, None]  # HxW to NHWC
-    score, idx = model(x, is_nhwc=True)
-    print("number: ", int(idx.squeeze()))
-    print("score: ", score.squeeze())
-
     with open(tmp_pipeline, "r", encoding="utf-8") as f:
         full_spec = json.load(f)
     full_spec = _add_vst_and_model_ops(
         full_spec,
-        os.path.basename(context_binary_file),
-        model_inputs[0],
-        model_outputs,
-        model_name,
+        MODEL_ASSET,
+        "input",
+        ["score", "class"],
+        "mnist",
         str(test_image),
     )
     with open(PIPE_JSON, "w", encoding="utf-8") as f:
         json.dump(full_spec, f, indent=2, ensure_ascii=False)
+    print(f"Wrote {PIPE_JSON}")
 
 
 if __name__ == "__main__":

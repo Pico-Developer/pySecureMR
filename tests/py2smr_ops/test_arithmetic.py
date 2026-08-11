@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 
 from securemr.py2smr import trace, ops, convert, verify
+from securemr.py2smr.verifier import run_pipeline_python
 from .conftest import run_op_test, skip_if_no_device, DEVICE_AVAILABLE
 
 
@@ -73,6 +74,27 @@ class TestArithmeticOp:
         assert verification.success, verification.error_message
         expected = input_arr + 10.0
         np.testing.assert_allclose(result, expected)
+
+    def test_arithmetic_multiple_operands_host(self):
+        """Test schema-v2 arithmetic expressions with multiple operands."""
+        spec = {
+            "tensors": {
+                "a": {"dimensions": [2, 2], "channels": 1, "data_type": 6, "is_placeholder": True, "usage": 6},
+                "b": {"dimensions": [2, 2], "channels": 1, "data_type": 6, "is_placeholder": True, "usage": 6},
+                "y": {"dimensions": [2, 2], "channels": 1, "data_type": 6, "is_placeholder": True, "usage": 6},
+            },
+            "operators": [
+                {"type": "arithmetic", "expression": "({0} * {1})", "inputs": ["a", "b"], "outputs": ["y"]}
+            ],
+            "inputs": ["a", "b"],
+            "outputs": ["y"],
+        }
+        a = np.ones((2, 2), dtype=np.float32) * 2.0
+        b = np.ones((2, 2), dtype=np.float32) * 3.0
+
+        outputs = run_pipeline_python(spec, {"a": a, "b": b})
+
+        np.testing.assert_allclose(outputs["y"], np.ones((2, 2), dtype=np.float32) * 6.0)
 
     def test_arithmetic_subtract(self):
         """Test arithmetic subtraction."""

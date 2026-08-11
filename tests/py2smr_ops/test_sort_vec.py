@@ -25,7 +25,7 @@ def test_sort_vec_device():
     spec = convert(ctx)
     expected = {"sorted": sorted_vec, "indices": indices}
     verification = verify(spec, {"vec": vec}, expected_outputs=expected, device=True)
-    if verification.error_message == "Device execution failed":
+    if verification.error_message == "Device verification is not available":
         import pytest
-        pytest.skip("pipeline_inspect produced no output files; device execution failed")
+        pytest.skip("Python verifier device execution is not available")
     assert verification.success

@@ -116,7 +116,7 @@ def run_op_test(
         duration=device_duration,
     )
 
-    if test_device and verification.error_message == "Device execution failed":
-        pytest.skip("pipeline_inspect produced no output files; device execution failed")
+    if test_device and verification.error_message == "Device verification is not available":
+        pytest.skip("Python verifier device execution is not available")
 
     return result, verification
