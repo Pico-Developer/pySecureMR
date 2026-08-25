@@ -78,6 +78,59 @@ _OP_ALIASES = {
     "assignment": "XR_SECURE_MR_OPERATOR_TYPE_ASSIGNMENT_PICO",
     "run_model_inference": "XR_SECURE_MR_OPERATOR_TYPE_RUN_MODEL_INFERENCE_PICO",
 }
+_XR_ONLY_OPERATORS = {
+    "LOAD_TEXTURE",
+    "RENDER_TEXT",
+    "SWITCH_GLTF_RENDER_STATUS",
+    "UPDATE_GLTF",
+}
+_SPATIAL_ONLY_OPERATORS = {
+    "SCENEGRAPH_VISIBILITY",
+    "UPDATE_COMPONENT",
+}
+
+_OP_ARITY: Mapping[str, tuple[int, Optional[int], int, Optional[int]]] = {
+    "UNKNOWN": (1, 1, 1, 1),
+    "ARITHMETIC_COMPOSE": (1, None, 1, 1),
+    "ELEMENTWISE_MIN": (2, 2, 1, 1),
+    "ELEMENTWISE_MAX": (2, 2, 1, 1),
+    "ELEMENTWISE_MULTIPLY": (2, 2, 1, 1),
+    "CUSTOMIZED_COMPARE": (2, 2, 1, 1),
+    "ELEMENTWISE_OR": (2, 2, 1, 1),
+    "ELEMENTWISE_AND": (2, 2, 1, 1),
+    "ALL": (1, 1, 1, 1),
+    "ANY": (1, 1, 1, 1),
+    "NMS": (2, 2, 1, 1),
+    "SOLVE_P_N_P": (3, 3, 2, 2),
+    "GET_AFFINE": (2, 2, 1, 1),
+    "APPLY_AFFINE": (2, 2, 1, 1),
+    "APPLY_AFFINE_POINT": (2, 2, 1, 1),
+    "UV_TO_3D_IN_CAM_SPACE": (5, 5, 1, 1),
+    "ASSIGNMENT": (1, 2, 1, 1),
+    "RUN_MODEL_INFERENCE": (1, None, 1, None),
+    "NORMALIZE": (1, 1, 1, 1),
+    "CAMERA_SPACE_TO_WORLD": (1, 1, 2, 2),
+    "RECTIFIED_VST_ACCESS": (0, 0, 1, 4),
+    "ARGMAX": (1, 1, 1, 1),
+    "CONVERT_COLOR": (1, 1, 1, 1),
+    "SORT_VEC": (1, 1, 1, 2),
+    "INVERSION": (1, 1, 1, 1),
+    "GET_TRANSFORM_MAT": (2, 3, 1, 1),
+    "SORT_MAT": (1, 1, 1, 2),
+    "SWITCH_GLTF_RENDER_STATUS": (1, 4, 0, 0),
+    "UPDATE_GLTF": (1, 3, 0, 0),
+    "RENDER_TEXT": (1, 5, 0, 0),
+    "LOAD_TEXTURE": (2, 2, 1, 1),
+    "SVD": (1, 1, 3, 3),
+    "NORM": (1, 1, 1, 1),
+    "SWAP_HWC_CHW": (1, 1, 1, 1),
+    "SCENEGRAPH_VISIBILITY": (1, 1, 1, 1),
+    "UPDATE_COMPONENT": (1, 1, 1, 1),
+    "JAVASCRIPT": (0, None, 1, None),
+    "MICROPHONE": (0, 0, 1, 1),
+    "SPEAKER": (1, 1, 1, 1),
+    "DEPTH": (0, 0, 1, 1),
+}
 
 
 def init_pipeline(path: Path, *, force: bool = False) -> int:
@@ -155,8 +208,14 @@ def add_op(
         if tensor_name and tensor_name not in tensors:
             raise PipelineCliError(f"Unknown tensor referenced by operator: {tensor_name}")
 
+    normalized_op_type = _operator_type(op_type)
+    _validate_operator_arity(normalized_op_type, inputs=inputs, outputs=outputs)
+    if normalized_op_type == _OP_ALIASES["arithmetic"] and not expression:
+        raise PipelineCliError("Arithmetic operators require --expression")
+    _validate_required_operator_metadata(normalized_op_type, attrs=attrs, flag=flag, model=model)
+
     op = {
-        "type": _operator_type(op_type),
+        "type": normalized_op_type,
         "inputs": list(inputs),
         "outputs": list(outputs),
     }
@@ -186,9 +245,132 @@ def add_op(
         }
 
     spec.setdefault("operators", []).append(op)
-    _validate_and_write(path, spec)
+    _validate_and_write_operator_update(path, spec)
     print(f"Added operator: {op_type}")
     return 0
+
+
+def remove_op(path: Path, index: int) -> int:
+    """Remove an operator from a pipeline by index."""
+    spec = _load_pipeline(path)
+    operators = spec.get("operators", [])
+    if not isinstance(operators, list):
+        raise PipelineCliError("Pipeline 'operators' must be a list")
+    if index < 0 or index >= len(operators):
+        raise PipelineCliError(f"Operator index out of range: {index}")
+    removed = operators.pop(index)
+    if not isinstance(removed, Mapping):
+        removed_type = "<invalid>"
+    else:
+        removed_type = str(removed.get("type") or removed.get("operator_type") or "<unknown>")
+    _validate_and_write_operator_update(path, spec)
+    print(f"Removed operator #{index}: {removed_type}")
+    return 0
+
+
+def remove_tensor(path: Path, name: str, *, force: bool = False) -> int:
+    """Remove a tensor descriptor from a pipeline."""
+    spec = _load_pipeline(path)
+    tensors = _tensors(spec)
+    if name not in tensors:
+        raise PipelineCliError(f"Tensor not found: {name}")
+
+    references = _operator_references_to_tensor(spec, name)
+    if references and not force:
+        details = ", ".join(f"#{index} {op_type}" for index, op_type in references)
+        raise PipelineCliError(
+            f"Tensor '{name}' is referenced by operator(s): {details}. "
+            "Remove those operators first or rerun with --force."
+        )
+
+    del tensors[name]
+    for key in ("inputs", "outputs"):
+        values = spec.get(key, [])
+        if isinstance(values, list):
+            spec[key] = [value for value in values if value != name]
+    if force and references:
+        validate_pipeline_spec(dict(spec))
+        _write_json(path, spec)
+    else:
+        _validate_and_write(path, spec)
+    print(f"Removed tensor: {name}")
+    if references and force:
+        details = ", ".join(f"#{index} {op_type}" for index, op_type in references)
+        print(f"Warning: removed tensor was referenced by operator(s): {details}")
+    return 0
+
+
+def _validate_operator_arity(
+    op_type: str,
+    *,
+    inputs: Sequence[str],
+    outputs: Sequence[str],
+) -> None:
+    op_name = _operator_enum_name(op_type)
+    arity = _OP_ARITY.get(op_name)
+    if arity is None:
+        return
+    min_inputs, max_inputs, min_outputs, max_outputs = arity
+    _validate_count(
+        op_name,
+        "input",
+        len(inputs),
+        minimum=min_inputs,
+        maximum=max_inputs,
+    )
+    _validate_count(
+        op_name,
+        "output",
+        len(outputs),
+        minimum=min_outputs,
+        maximum=max_outputs,
+    )
+
+
+def _validate_count(
+    op_name: str,
+    label: str,
+    count: int,
+    *,
+    minimum: int,
+    maximum: Optional[int],
+) -> None:
+    if count < minimum or (maximum is not None and count > maximum):
+        expected = _format_count_range(minimum, maximum)
+        raise PipelineCliError(
+            f"{op_name.lower()} operators require {expected} {label} tensor(s); got {count}"
+        )
+
+
+def _format_count_range(minimum: int, maximum: Optional[int]) -> str:
+    if maximum is None:
+        return f"at least {minimum}"
+    if minimum == maximum:
+        return f"exactly {minimum}"
+    return f"{minimum} to {maximum}"
+
+
+def _validate_required_operator_metadata(
+    op_type: str,
+    *,
+    attrs: Sequence[str],
+    flag: Optional[str],
+    model: Optional[str],
+) -> None:
+    if op_type.endswith("CONVERT_COLOR_PICO") and flag is None and not attrs:
+        raise PipelineCliError("convert_color operators require --flag")
+    if op_type.endswith("CUSTOMIZED_COMPARE_PICO") and not attrs:
+        raise PipelineCliError("customized_compare operators require --attr with a compare operator")
+    if op_type.endswith("JAVASCRIPT_PICO") and not attrs:
+        raise PipelineCliError("javascript operators require --attr with JavaScript code")
+    if op_type.endswith("RENDER_TEXT_PICO") and len(attrs) < 2:
+        raise PipelineCliError(
+            "render_text operators require --attr config and --attr text"
+        )
+    if op_type.endswith("UPDATE_GLTF_PICO") and not attrs:
+        raise PipelineCliError("update_gltf operators require --attr with update type")
+    if op_type == _OP_ALIASES["run_model_inference"] and model is None:
+        raise PipelineCliError("run_model_inference operators require --model")
 
 
 def set_input(path: Path, names: Sequence[str]) -> int:
@@ -285,18 +467,167 @@ def _load_pipeline(path: Path) -> dict[str, Any]:
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as file:
-        json.dump(payload, file, indent=2, ensure_ascii=False)
-        file.write("\n")
-    tmp.replace(path)
+    _write_json_updates([(path, payload)])
+
+
+def _write_json_updates(updates: Sequence[tuple[Path, Mapping[str, Any]]]) -> None:
+    temp_paths: list[Path] = []
+    try:
+        for path, payload in updates:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as file:
+                json.dump(payload, file, indent=2, ensure_ascii=False)
+                file.write("\n")
+            temp_paths.append(tmp)
+        for tmp, (path, _payload) in zip(temp_paths, updates):
+            tmp.replace(path)
+    finally:
+        for tmp in temp_paths:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _validate_and_write_operator_update(path: Path, spec: Mapping[str, Any]) -> None:
+    _validate_pipeline_update(spec)
+    manifest_update = _prepare_manifest_modes_for_pipeline(path, spec)
+    updates: list[tuple[Path, Mapping[str, Any]]] = [(path, spec)]
+    if manifest_update is not None:
+        updates.append(manifest_update)
+    _write_json_updates(updates)
+
+
+def _validate_pipeline_update(spec: Mapping[str, Any]) -> None:
+    validate_pipeline_spec(dict(spec))
+    _validate_tensor_references(spec)
 
 
 def _validate_and_write(path: Path, spec: Mapping[str, Any]) -> None:
-    validate_pipeline_spec(dict(spec))
-    _validate_tensor_references(spec)
+    _validate_pipeline_update(spec)
     _write_json(path, spec)
+
+
+def _prepare_manifest_modes_for_pipeline(
+    path: Path,
+    spec: Mapping[str, Any],
+) -> Optional[tuple[Path, Mapping[str, Any]]]:
+    manifest_context = _find_manifest_context(path)
+    if manifest_context is None:
+        classification = _classify_mode_specific_operators(spec.get("operators", []))
+        _raise_if_modes_conflict(classification)
+        return None
+
+    manifest_path, manifest = manifest_context
+    runtime = manifest.setdefault("runtime", {})
+    if not isinstance(runtime, dict):
+        raise PipelineCliError("Package manifest 'runtime' must be an object")
+    supported_modes = runtime.get("supported_modes", [])
+    if supported_modes and not isinstance(supported_modes, list):
+        raise PipelineCliError("Package manifest runtime.supported_modes must be a list")
+
+    pipeline_specs = _load_manifest_pipeline_specs_with_candidate(
+        manifest,
+        manifest_path.parent,
+        path,
+        spec,
+    )
+    classification = _classify_mode_specific_pipeline_specs(pipeline_specs)
+    _raise_if_modes_conflict(classification)
+
+    current_modes = {str(mode).strip().lower() for mode in supported_modes}
+    if classification["xr"]:
+        if current_modes and "xr" not in current_modes:
+            raise PipelineCliError(
+                "Cannot add XR-only operator to pipeline referenced by a manifest "
+                "whose runtime.supported_modes only includes spatial."
+            )
+        desired_modes = ["xr"]
+    elif classification["spatial"]:
+        if current_modes and "spatial" not in current_modes:
+            raise PipelineCliError(
+                "Cannot add Spatial-only operator to pipeline referenced by a manifest "
+                "whose runtime.supported_modes only includes xr."
+            )
+        desired_modes = ["spatial"]
+    elif current_modes:
+        desired_modes = ["xr", "spatial"]
+    else:
+        return None
+    if list(supported_modes) == desired_modes:
+        return None
+    runtime["supported_modes"] = desired_modes
+    return manifest_path, manifest
+
+
+def _load_manifest_pipeline_specs_with_candidate(
+    manifest: Mapping[str, Any],
+    root: Path,
+    candidate_path: Path,
+    candidate_spec: Mapping[str, Any],
+) -> list[tuple[str, Mapping[str, Any]]]:
+    pipelines = manifest.get("pipelines", [])
+    if not isinstance(pipelines, list):
+        raise PipelineCliError("Package manifest 'pipelines' must be a list")
+
+    resolved_candidate_path = candidate_path.resolve()
+    pipeline_specs: list[tuple[str, Mapping[str, Any]]] = []
+    matched_candidate = False
+    for index, item in enumerate(pipelines):
+        if not isinstance(item, Mapping):
+            raise PipelineCliError("Package manifest pipeline entries must be objects")
+        rel_path = item.get("path")
+        if not isinstance(rel_path, str) or not rel_path:
+            raise PipelineCliError("Package manifest pipeline entries require a non-empty path")
+        pipeline_id = str(item.get("id") or rel_path or index)
+        pipeline_path = _resolve_manifest_pipeline_path(root, rel_path)
+        if pipeline_path == resolved_candidate_path:
+            pipeline_specs.append((pipeline_id, candidate_spec))
+            matched_candidate = True
+            continue
+        pipeline_specs.append((pipeline_id, _load_pipeline(pipeline_path)))
+    if not matched_candidate:
+        raise PipelineCliError("Package manifest no longer references the edited pipeline")
+    return pipeline_specs
+
+
+def _resolve_manifest_pipeline_path(root: Path, path: str) -> Path:
+    raw_path = Path(path)
+    normalized = path.replace("\\", "/").strip("/")
+    if raw_path.is_absolute() or path.replace("\\", "/").startswith("/") or not normalized:
+        raise PipelineCliError(f"Package manifest pipeline path must be package-relative: {path}")
+    parts = normalized.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise PipelineCliError(f"Invalid package manifest pipeline path: {path}")
+    resolved_root = root.resolve()
+    resolved_path = (root / normalized).resolve()
+    try:
+        resolved_path.relative_to(resolved_root)
+    except ValueError as exc:
+        raise PipelineCliError(f"Package manifest pipeline path escapes package root: {path}") from exc
+    return resolved_path
+
+
+def _classify_mode_specific_pipeline_specs(
+    pipeline_specs: Sequence[tuple[str, Mapping[str, Any]]],
+) -> dict[str, set[str]]:
+    xr_only = []
+    spatial_only = []
+    for pipeline_id, spec in pipeline_specs:
+        classification = _classify_mode_specific_operators(spec.get("operators", []))
+        xr_only.extend(f"{pipeline_id}:{op_type}" for op_type in sorted(classification["xr"]))
+        spatial_only.extend(f"{pipeline_id}:{op_type}" for op_type in sorted(classification["spatial"]))
+    return {"xr": set(xr_only), "spatial": set(spatial_only)}
+
+
+def _raise_if_modes_conflict(classification: Mapping[str, set[str]]) -> None:
+    if classification["xr"] and classification["spatial"]:
+        raise PipelineCliError(
+            "Cannot update pipeline because it would mix XR-only and Spatial-only operators. "
+            f"XR-only: {', '.join(sorted(classification['xr']))}. "
+            f"Spatial-only: {', '.join(sorted(classification['spatial']))}."
+        )
 
 
 def _validate_tensor_references(spec: Mapping[str, Any]) -> None:
@@ -320,6 +651,87 @@ def _validate_tensor_references(spec: Mapping[str, Any]) -> None:
                     raise PipelineCliError(
                         f"Operator #{index} references unknown tensor '{tensor_name}'"
                     )
+
+
+def _operator_references_to_tensor(spec: Mapping[str, Any], tensor_name: str) -> list[tuple[int, str]]:
+    references = []
+    for index, op in enumerate(spec.get("operators", [])):
+        if not isinstance(op, Mapping):
+            continue
+        for key in ("inputs", "outputs"):
+            for ref in op.get(key, []):
+                if _resolve_ref_name(ref) == tensor_name:
+                    references.append((index, str(op.get("type") or op.get("operator_type") or "<unknown>")))
+                    break
+            else:
+                continue
+            break
+    return references
+
+
+def _classify_mode_specific_operators(operators: Sequence[Any]) -> dict[str, set[str]]:
+    xr_only = []
+    spatial_only = []
+    for op in operators:
+        if not isinstance(op, Mapping):
+            continue
+        op_type = _operator_enum_name(str(op.get("type") or op.get("operator_type") or ""))
+        if op_type in _XR_ONLY_OPERATORS:
+            xr_only.append(op_type)
+        if op_type in _SPATIAL_ONLY_OPERATORS:
+            spatial_only.append(op_type)
+    return {"xr": set(xr_only), "spatial": set(spatial_only)}
+
+
+def _find_manifest_context(path: Path) -> Optional[tuple[Path, dict[str, Any]]]:
+    pipeline_path = path.resolve()
+    for manifest_path in _candidate_manifest_paths(path):
+        if not manifest_path.is_file():
+            continue
+        try:
+            manifest = _read_json_file(manifest_path)
+        except PipelineCliError:
+            continue
+        if not _manifest_references_pipeline(manifest, manifest_path.parent, pipeline_path):
+            continue
+        return manifest_path, manifest
+    return None
+
+
+def _candidate_manifest_paths(path: Path) -> list[Path]:
+    candidates = []
+    for directory in [path.parent, *path.parents]:
+        candidate = directory / "manifest.json"
+        if candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def _manifest_references_pipeline(manifest: Mapping[str, Any], root: Path, pipeline_path: Path) -> bool:
+    pipelines = manifest.get("pipelines", [])
+    if not isinstance(pipelines, list):
+        return False
+    for item in pipelines:
+        if not isinstance(item, Mapping):
+            continue
+        rel_path = item.get("path")
+        if not isinstance(rel_path, str) or not rel_path:
+            continue
+        try:
+            manifest_pipeline = _resolve_manifest_pipeline_path(root, rel_path)
+        except (OSError, PipelineCliError):
+            continue
+        if manifest_pipeline == pipeline_path:
+            return True
+    return False
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as file:
+        payload = json.load(file)
+    if not isinstance(payload, dict):
+        raise PipelineCliError(f"JSON file must contain an object: {path}")
+    return payload
 
 
 def _tensors(spec: dict[str, Any]) -> dict[str, Any]:
@@ -414,6 +826,15 @@ def _operator_type(op_type: str) -> str:
     if key.startswith("XR_SECURE_MR_OPERATOR_TYPE_"):
         return key
     return f"XR_SECURE_MR_OPERATOR_TYPE_{key.upper()}_PICO"
+
+
+def _operator_enum_name(op_type: str) -> str:
+    value = str(op_type).strip()
+    if value.startswith("XR_SECURE_MR_OPERATOR_TYPE_"):
+        value = value[len("XR_SECURE_MR_OPERATOR_TYPE_"):]
+    if value.endswith("_PICO"):
+        value = value[: -len("_PICO")]
+    return value.upper()
 
 
 def _normalize_model_path(model: str) -> str:

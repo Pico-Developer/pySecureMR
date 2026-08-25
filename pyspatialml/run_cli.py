@@ -29,8 +29,6 @@ from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 
-from securemr.py2smr.verifier import run_pipeline_python
-
 from pyspatialml import litert_runtime
 from pyspatialml.litert_tools import LiteRTToolError, resolve_litert_cli
 from pyspatialml.pipeline_cli import PipelineCliError, _load_input_array
@@ -86,6 +84,14 @@ _POST_DET_TENSOR_SIZE = (
 )
 
 
+_PACKAGE_TARGET_HINT = (
+    "Run targets must be a SpatialML pipeline package directory containing "
+    "manifest.json, or a .zip package containing manifest.json. The manifest "
+    "must include a non-empty pipelines list with paths to pipeline JSON files. "
+    "Use `pyspatialml package create` to create a package from pipeline JSON."
+)
+
+
 def run_host(
     target: Path,
     *,
@@ -94,7 +100,7 @@ def run_host(
     output_dir: Optional[Path] = None,
     dumps: Sequence[str] = (),
 ) -> int:
-    """Run a pipeline JSON or package pipeline on the host Python executor."""
+    """Run a pipeline package on the host Python executor."""
     run_targets, package_context = _resolve_pipeline_targets(target, pipeline_ids=pipeline_ids)
     input_values, default_input_path = _parse_host_inputs(inputs)
     try:
@@ -145,8 +151,7 @@ def run_device(
     script = _xr_runner_script()
     if not script.is_file():
         raise RunCliError(f"XR runner script not found: {script}")
-    if not target.exists():
-        raise RunCliError(f"Target package not found: {target}")
+    _validate_run_package_target(target)
     _validate_device_run_args(
         inputs=inputs,
         dumps=dumps,
@@ -208,6 +213,31 @@ def run_device(
     return result.returncode
 
 
+def _validate_run_package_target(target: Path) -> None:
+    if target.is_file() and target.suffix.lower() == ".json":
+        raise RunCliError(f"Raw pipeline JSON is not a valid run target: {target}. {_PACKAGE_TARGET_HINT}")
+    if not target.exists():
+        raise RunCliError(f"Target package not found: {target}. {_PACKAGE_TARGET_HINT}")
+    package_context = _materialize_package(target)
+    try:
+        manifest = _load_run_manifest(package_context.root)
+        _validate_manifest_pipeline_files(package_context.root, manifest)
+    finally:
+        if package_context.cleanup_root is not None:
+            shutil.rmtree(package_context.cleanup_root, ignore_errors=True)
+
+
+def _validate_manifest_pipeline_files(root: Path, manifest: Mapping[str, Any]) -> None:
+    for item in manifest.get("pipelines", []):
+        if not isinstance(item, Mapping):
+            raise RunCliError("Package manifest pipelines entries must be objects")
+        path_value = item.get("path")
+        if not isinstance(path_value, str) or not path_value:
+            raise RunCliError("Package manifest pipeline entries require a non-empty path")
+        if not (root / path_value).is_file():
+            raise RunCliError(f"Package manifest pipeline file not found: {path_value}. {_PACKAGE_TARGET_HINT}")
+
+
 def _validate_device_run_args(
     *,
     inputs: Sequence[str],
@@ -255,6 +285,8 @@ def _run_one_pipeline(
     output_dir: Optional[Path],
     dumps: Sequence[str],
 ) -> HostPipelineResult:
+    from securemr.py2smr.verifier import run_pipeline_python
+
     spec = _read_json(run_target.path)
     spec = _normalize_run_pipeline_spec(spec, manifest_model=run_target.manifest_model)
     if default_input_path is not None:
@@ -343,9 +375,7 @@ def _print_host_summary(results: Sequence[HostPipelineResult], total_elapsed_ms:
 
 def _resolve_pipeline_targets(target: Path, *, pipeline_ids: Sequence[str]) -> tuple[list[PipelineRunTarget], PackageContext]:
     if target.is_file() and target.suffix.lower() == ".json":
-        if pipeline_ids:
-            raise RunCliError("--pipeline is only valid when running a package")
-        return [PipelineRunTarget(id=None, path=target, asset_root=target.parent)], PackageContext(root=target.parent)
+        raise RunCliError(f"Raw pipeline JSON is not a valid run target: {target}. {_PACKAGE_TARGET_HINT}")
     package_context = _materialize_package(target)
     root = package_context.root
     manifest = _load_run_manifest(root)
@@ -466,7 +496,7 @@ def _materialize_package(path: Path) -> PackageContext:
             except ZipSafetyError as exc:
                 raise RunCliError(str(exc)) from exc
         return PackageContext(root=_find_package_root(cleanup_root), cleanup_root=cleanup_root)
-    raise RunCliError(f"Target is not a pipeline JSON or package: {path}")
+    raise RunCliError(f"Target is not a SpatialML pipeline package directory or .zip package: {path}. {_PACKAGE_TARGET_HINT}")
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -543,7 +573,9 @@ def _apply_default_image_input(
     if not applied:
         targets = _default_image_tensor_names(normalized)
         if not targets:
-            raise RunCliError("Bare --input path could not be applied: no VST image tensors found")
+            targets = _declared_input_tensor_names(normalized)
+        if not targets:
+            raise RunCliError("Bare --input path could not be applied: no declared input tensors found")
         try:
             image = _load_input_array(image_path)
         except PipelineCliError as exc:
@@ -594,6 +626,20 @@ def _default_image_tensor_names(spec: Mapping[str, Any]) -> list[str]:
         if "image" not in lowered:
             continue
         if lowered.startswith("vst_") or "vst" in lowered:
+            result.append(name)
+    return result
+
+
+def _declared_input_tensor_names(spec: Mapping[str, Any]) -> list[str]:
+    tensors = spec.get("tensors", {})
+    if not isinstance(tensors, Mapping):
+        return []
+    inputs = spec.get("inputs", [])
+    if not isinstance(inputs, list):
+        return []
+    result = []
+    for name in inputs:
+        if isinstance(name, str) and isinstance(tensors.get(name), Mapping):
             result.append(name)
     return result
 

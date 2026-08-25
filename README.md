@@ -2,7 +2,7 @@
 
 <p align="center">
   <a  alt="python version">
-      <img src="https://img.shields.io/badge/python-3.10-blue?logo=python" /></a>
+      <img src="https://img.shields.io/badge/python-3.13-blue?logo=python" /></a>
   <a> <img src="https://img.shields.io/badge/spatial-ml-green" /></a>
   <a> <img src="https://img.shields.io/badge/os-linux-yellow" /></a>
   <a> <img src="https://img.shields.io/badge/os-windows(wsl2)-yellow" /></a>
@@ -37,22 +37,27 @@ operator bindings and py2smr tracing helpers, while the user-facing CLI is `pysp
 
 ## Install
 
+Use Python 3.13 for pySpatialML. LiteRT currently requires Python 3.13 for the
+managed runtime and CLI environment.
+
 ### Pip
 
 ```bash
-pip3 install pyspatialml
+python3.13 -m pip install pyspatialml
 ```
 
 ### Manual install
 ```bash
 git clone https://github.com/Pico-Developer/pySpatialML
 cd pySpatialML
-pip3 install -e "."
+python3.13 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e "."
 ```
 Check installation:
 ```bash
 pyspatialml --version
-python3 -c "import securemr"
+python -c "import securemr"
 ```
 
 ## Command summary
@@ -63,9 +68,11 @@ Use `pyspatialml --help` or any subcommand `--help` for the full option list.
 | --- | --- |
 | `pyspatialml tools litert status` | Show which LiteRT CLI executable pySpatialML will use. |
 | `pyspatialml tools litert install` | Install the managed LiteRT CLI into the pySpatialML tool cache. |
+| `pyspatialml tools litert install --force` | Recreate and reinstall the managed LiteRT CLI. |
+| `pyspatialml tools litert repair` | Repair a missing or corrupted managed LiteRT CLI install. |
 | `pyspatialml model info MODEL.tflite` | Print LiteRT/TFLite model input and output metadata. |
 | `pyspatialml model run -- ...` | Delegate `litert run` through pySpatialML tool resolution. |
-| `pyspatialml model convert -- ...` | Delegate `litert convert`. |
+| `pyspatialml model convert -- ...` | Convert supported models. |
 | `pyspatialml model quantize -- ...` | Delegate `litert quantize`. |
 | `pyspatialml model benchmark -- ...` | Delegate `litert benchmark`. |
 | `pyspatialml model visualize -- ...` | Delegate `litert visualize`. |
@@ -83,21 +90,30 @@ Use `pyspatialml --help` or any subcommand `--help` for the full option list.
 | `pyspatialml package create ...` | Create a SpatialML pipeline package directory or zip from one or more pipeline JSON files. |
 | `pyspatialml package validate PACKAGE` | Validate a package directory or zip. |
 | `pyspatialml package inspect PACKAGE` | Print a package summary. |
-| `pyspatialml run host TARGET` | Run a pipeline JSON, package directory, or package zip on the host Python executor. |
+| `pyspatialml run host PACKAGE` | Run a package directory or zip on the host Python executor. |
 | `pyspatialml run device PACKAGE` | Run a package directory or zip on a connected XR device through the bundled runner APK. |
 | `pyspatialml compare EXPECTED ACTUAL` | Compare tensor output `.npy` files or directories. |
 
 ## LiteRT CLI
 
 Model-level commands are delegated to Google AI Edge LiteRT CLI where possible.
-Host-side model inspection and pipeline execution use the Python LiteRT runtime
-installed with pySpatialML. Delegated LiteRT CLI commands first use an existing
-`litert` executable on `PATH`; otherwise pySpatialML installs a managed copy into
-the tool cache when needed.
+PyTorch conversion is handled by the LiteRT CLI, while ONNX conversion is
+handled by a managed `onnx2tf` install when an `.onnx` input is passed to
+`pyspatialml model convert`. Host-side model inspection and pipeline execution
+use the Python LiteRT runtime installed with pySpatialML. Delegated LiteRT CLI
+commands first use an existing `litert` executable on `PATH`; otherwise
+pySpatialML installs a managed copy into the tool cache when needed.
+
+Traditional PyTorch checkpoints may need a small conversion script that
+constructs the model, loads weights, and returns sample inputs. See the
+[LiteRT CLI troubleshooting and tips](https://github.com/google-ai-edge/LiteRT-CLI#troubleshooting-and-tips)
+for script-based conversion guidance.
 
 ```bash
 pyspatialml tools litert status
 pyspatialml tools litert install
+pyspatialml tools litert repair
+pyspatialml model convert -- <model> --output ./converted_tflite
 pyspatialml model run -- --help
 pyspatialml model benchmark -- --help
 ```
@@ -151,6 +167,11 @@ Use `--asset-root` when referenced assets are not next to the source pipeline
 or relative to the current working directory.
 
 ## Run pipelines
+
+Run commands require a SpatialML pipeline package directory or zip containing
+`manifest.json`; the manifest must point to valid pipeline JSON files. If you
+only have pipeline JSON, create a package with `pyspatialml package create`
+first.
 
 Run a pipeline package on the host Python executor:
 
@@ -230,7 +251,7 @@ device-outputs/
 ## Run test
 
 ```bash
-pytest
+python3.13 -m pytest
 ```
 Refer to [test code](./tests) to learn more about the usage.
 

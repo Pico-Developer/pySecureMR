@@ -149,10 +149,13 @@ def install_litert_cli(
     cache_dir: Optional[Path] = None,
     package: str = DEFAULT_LITERT_PACKAGE,
     version: str = DEFAULT_LITERT_VERSION,
+    force: bool = False,
 ) -> LiteRTCli:
     """Install LiteRT CLI into the pySpatialML managed tool cache."""
     cache = cache_dir or default_tool_cache()
     venv_dir = cache / "litert-cli"
+    if force and venv_dir.exists():
+        shutil.rmtree(venv_dir)
     venv_dir.parent.mkdir(parents=True, exist_ok=True)
     if not venv_dir.exists():
         venv.EnvBuilder(with_pip=True, clear=False).create(venv_dir)
@@ -178,6 +181,16 @@ def install_litert_cli(
         )
     managed_litert_spec_file(cache).write_text(package_spec + "\n", encoding="utf-8")
     return LiteRTCli(path=litert, managed=True)
+
+
+def repair_litert_cli(
+    *,
+    cache_dir: Optional[Path] = None,
+    package: str = DEFAULT_LITERT_PACKAGE,
+    version: str = DEFAULT_LITERT_VERSION,
+) -> LiteRTCli:
+    """Recreate the pySpatialML managed LiteRT CLI environment."""
+    return install_litert_cli(cache_dir=cache_dir, package=package, version=version, force=True)
 
 
 def _venv_python(venv_dir: Path) -> Path:

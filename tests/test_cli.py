@@ -1,12 +1,30 @@
 import subprocess
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from pyspatialml import cli as cli_module
 from pyspatialml.litert_tools import LiteRTCli, LiteRTToolError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FACE_MODEL = REPO_ROOT / "tests" / "data" / "face_mediapipe_package" / "model" / "face_detector.tflite"
+
+
+def _create_cli_run_package(tmp_path, pipeline, *, pipeline_id="main"):
+    package = tmp_path / f"{pipeline.stem}-package"
+    assert cli_module.main(
+        [
+            "package",
+            "create",
+            "--id",
+            "run-demo",
+            "--pipeline",
+            f"{pipeline_id}={pipeline}",
+            "--output",
+            str(package),
+        ]
+    ) == 0
+    return package
 
 
 def test_tools_litert_status_prints_resolved_cli(monkeypatch, capsys, tmp_path):
@@ -102,8 +120,8 @@ def test_tools_litert_install_uses_requested_package_and_version(monkeypatch, ca
     calls = []
     litert = LiteRTCli(path=tmp_path / "litert-cli" / "bin" / "litert", managed=True)
 
-    def _install_litert_cli(*, cache_dir=None, package="", version=""):
-        calls.append((cache_dir, package, version))
+    def _install_litert_cli(*, cache_dir=None, package="", version="", force=False):
+        calls.append((cache_dir, package, version, force))
         return litert
 
     monkeypatch.setattr(cli_module, "install_litert_cli", _install_litert_cli)
@@ -124,8 +142,45 @@ def test_tools_litert_install_uses_requested_package_and_version(monkeypatch, ca
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert calls == [(tmp_path, "ai-edge-litert-nightly", "9.9.9")]
+    assert calls == [(tmp_path, "ai-edge-litert-nightly", "9.9.9", False)]
     assert f"LiteRT CLI installed: {litert.path}" in captured.out
+
+
+def test_tools_litert_install_force_recreates_managed_env(monkeypatch, capsys, tmp_path):
+    calls = []
+    litert = LiteRTCli(path=tmp_path / "litert-cli" / "bin" / "litert", managed=True)
+
+    def _install_litert_cli(*, cache_dir=None, package="", version="", force=False):
+        calls.append((cache_dir, package, version, force))
+        return litert
+
+    monkeypatch.setattr(cli_module, "install_litert_cli", _install_litert_cli)
+
+    exit_code = cli_module.main(["tools", "litert", "install", "--tool-cache", str(tmp_path), "--force"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert calls == [(tmp_path, "litert-cli", "0.1.0", True)]
+    assert f"LiteRT CLI installed: {litert.path}" in captured.out
+
+
+def test_tools_litert_repair_recreates_managed_env(monkeypatch, capsys, tmp_path):
+    calls = []
+    litert = LiteRTCli(path=tmp_path / "litert-cli" / "bin" / "litert", managed=True)
+
+    def _repair_litert_cli(*, cache_dir=None, package="", version=""):
+        calls.append((cache_dir, package, version))
+        return litert
+
+    monkeypatch.setattr(cli_module, "repair_litert_cli", _repair_litert_cli)
+
+    exit_code = cli_module.main(["tools", "litert", "repair", "--tool-cache", str(tmp_path), "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert calls == [(tmp_path, "litert-cli", "0.1.0")]
+    assert payload["command"] == "tools litert repair"
+    assert payload["recreated"] is True
 
 
 def test_compare_command_passes(capsys, tmp_path):
@@ -221,6 +276,291 @@ def test_model_command_json_wraps_delegated_litert(monkeypatch, capsys, tmp_path
     assert payload["argv"] == [str(litert.path), "benchmark", "model.tflite"]
     assert payload["stdout"] == "litert stdout"
     assert payload["stderr"] == "litert stderr"
+
+
+def test_model_convert_help_includes_onnx_and_litert_help(monkeypatch, capsys, tmp_path):
+    litert = LiteRTCli(path=tmp_path / "bin" / "litert", managed=False)
+    monkeypatch.setattr(cli_module, "resolve_litert_cli", lambda ensure=False, cache_dir=None: litert)
+
+    def _run(argv, env=None, text=False, stdout=None, stderr=None):
+        return subprocess.CompletedProcess(argv, 0, stdout="Usage: litert convert [OPTIONS] MODEL_OR_SCRIPT\n", stderr="")
+
+    monkeypatch.setattr(cli_module.subprocess, "run", _run)
+
+    exit_code = cli_module.main(["model", "convert", "--", "--help"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "ONNX input:" in captured.out
+    assert "pyspatialml model convert -- model.onnx --output ./converted_tflite" in captured.out
+    assert "--input-shape NAME:DIMS" in captured.out
+    assert "--onnx2tf-arg VALUE" in captured.out
+    assert "LiteRT convert help:" in captured.out
+    assert "Usage: litert convert" in captured.out
+
+
+def test_model_convert_help_json_includes_onnx_and_litert_help(monkeypatch, capsys, tmp_path):
+    litert = LiteRTCli(path=tmp_path / "bin" / "litert", managed=False)
+    monkeypatch.setattr(cli_module, "resolve_litert_cli", lambda ensure=False, cache_dir=None: litert)
+
+    def _run(argv, env=None, text=False, stdout=None, stderr=None):
+        return subprocess.CompletedProcess(argv, 0, stdout="Usage: litert convert [OPTIONS] MODEL_OR_SCRIPT\n", stderr="")
+
+    monkeypatch.setattr(cli_module.subprocess, "run", _run)
+
+    exit_code = cli_module.main(["model", "convert", "--json", "--", "--help"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["ok"] is True
+    assert payload["command"] == "model convert"
+    assert "ONNX input:" in payload["stdout"]
+    assert "--no-large-tensor" in payload["stdout"]
+    assert "Usage: litert convert" in payload["stdout"]
+
+
+def test_model_convert_routes_onnx_without_litert(monkeypatch, capsys, tmp_path):
+    model = tmp_path / "model.onnx"
+    output = tmp_path / "converted"
+    model.write_bytes(b"onnx")
+    calls = []
+
+    def _resolve_litert_cli(*_args, **_kwargs):
+        raise AssertionError("ONNX convert should not resolve LiteRT")
+
+    def _convert_onnx_to_tflite(**kwargs):
+        calls.append(kwargs)
+        tflite = output / "model.tflite"
+        tflite.parent.mkdir()
+        tflite.write_bytes(b"tflite")
+        return SimpleNamespace(
+            model=kwargs["model"],
+            output=kwargs["output"],
+            tflite_models=[tflite],
+            argv=["onnx2tf", "-i", str(model), "-o", str(output)],
+            stdout="stdout",
+            stderr="stderr",
+            tool=SimpleNamespace(path=tmp_path / "onnx2tf", managed=True),
+        )
+
+    monkeypatch.setattr(cli_module, "resolve_litert_cli", _resolve_litert_cli)
+    monkeypatch.setattr(cli_module.onnx_tools, "convert_onnx_to_tflite", _convert_onnx_to_tflite)
+
+    exit_code = cli_module.main(["model", "convert", "--", str(model), "--output", str(output), "--verbosity", "debug"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert calls == [
+        {
+            "model": model,
+            "output": output,
+            "extra_args": ["--verbosity", "debug"],
+            "cache_dir": None,
+            "verbose": True,
+        }
+    ]
+    assert f"Converted ONNX model: {model}" in captured.out
+    assert f"TFLite model: {output / 'model.tflite'}" in captured.out
+    assert "stderr" in captured.err
+
+
+def test_model_convert_routes_onnx_json(monkeypatch, capsys, tmp_path):
+    model = tmp_path / "model.onnx"
+    output = tmp_path / "converted"
+    model.write_bytes(b"onnx")
+
+    def _convert_onnx_to_tflite(**kwargs):
+        tflite = output / "model.tflite"
+        return SimpleNamespace(
+            model=kwargs["model"],
+            output=kwargs["output"],
+            tflite_models=[tflite],
+            argv=["onnx2tf", "-i", str(model), "-o", str(output)],
+            stdout="stdout",
+            stderr="stderr",
+            tool=SimpleNamespace(path=tmp_path / "onnx2tf", managed=True),
+        )
+
+    monkeypatch.setattr(cli_module.onnx_tools, "convert_onnx_to_tflite", _convert_onnx_to_tflite)
+
+    exit_code = cli_module.main(["model", "convert", "--json", "--", str(model), "--output", str(output)])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["ok"] is True
+    assert payload["converter"] == "onnx2tf"
+    assert payload["model"] == str(model)
+    assert payload["output"] == str(output)
+    assert payload["tflite_models"] == [str(output / "model.tflite")]
+
+
+def test_model_convert_translates_onnx_alias_flags(monkeypatch, tmp_path):
+    model = tmp_path / "model.onnx"
+    output = tmp_path / "converted"
+    model.write_bytes(b"onnx")
+    calls = []
+
+    def _convert_onnx_to_tflite(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            model=kwargs["model"],
+            output=kwargs["output"],
+            tflite_models=[output / "model.tflite"],
+            argv=[],
+            stdout="",
+            stderr="",
+            tool=SimpleNamespace(path=tmp_path / "onnx2tf", managed=True),
+        )
+
+    monkeypatch.setattr(cli_module.onnx_tools, "convert_onnx_to_tflite", _convert_onnx_to_tflite)
+
+    assert cli_module.main(
+        [
+            "model",
+            "convert",
+            "--",
+            str(model),
+            "--output",
+            str(output),
+            "--input-shape",
+            "images:1,3,640,640",
+            "--shape-hint=tokens:1,128",
+            "--no-large-tensor",
+            "--keep-nchw",
+            "images",
+            "--keep-nhwc=features",
+            "--non-verbose",
+            "--copy-input-output-names",
+            "--dynamic-range-quantize",
+            "--integer-quantize",
+            "--onnx2tf-arg",
+            "--disable_strict_mode",
+            "--onnx2tf-arg=--output_nms_with_dynamic_tensor",
+        ]
+    ) == 0
+
+    assert calls[0]["extra_args"] == [
+        "--overwrite_input_shape",
+        "images:1,3,640,640",
+        "--shape_hints",
+        "tokens:1,128",
+        "--no_large_tensor",
+        "--keep_ncw_or_nchw_or_ncdhw_input_names",
+        "images",
+        "--keep_nwc_or_nhwc_or_ndhwc_input_names",
+        "features",
+        "--non_verbose",
+        "--copy_onnx_input_output_names_to_tflite",
+        "--output_dynamic_range_quantized_tflite",
+        "--output_integer_quantized_tflite",
+        "--disable_strict_mode",
+        "--output_nms_with_dynamic_tensor",
+    ]
+
+
+def test_model_convert_onnx_alias_requires_value(capsys, tmp_path):
+    model = tmp_path / "model.onnx"
+    output = tmp_path / "converted"
+    model.write_bytes(b"onnx")
+
+    exit_code = cli_module.main(["model", "convert", "--", str(model), "--output", str(output), "--input-shape"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "PSM_ONNX_CONVERT" in captured.err
+    assert "--input-shape requires a value" in captured.err
+
+
+def test_model_convert_reports_missing_local_model_before_litert(capsys, tmp_path):
+    missing = tmp_path / "model.onn"
+    output = tmp_path / "model.tflite"
+
+    exit_code = cli_module.main(["model", "convert", str(missing), "--output", str(output)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "PSM_ONNX_CONVERT" in captured.err
+    assert f"Model input file not found: {missing}" in captured.err
+    assert "Pass an existing model file" in captured.err
+
+
+def test_model_convert_allows_non_path_model_names(monkeypatch, tmp_path):
+    litert = SimpleNamespace(path=tmp_path / "litert", managed=False)
+    calls = []
+
+    monkeypatch.setattr(cli_module, "resolve_litert_cli", lambda ensure=False, cache_dir=None: litert)
+    monkeypatch.setattr(cli_module.subprocess, "run", lambda argv, **kwargs: calls.append((argv, kwargs)) or SimpleNamespace(returncode=0))
+
+    assert cli_module.main(["model", "convert", "repo/model-name", "--output", str(tmp_path / "out")]) == 0
+    assert calls[0][0] == [str(litert.path), "convert", "repo/model-name", "--output", str(tmp_path / "out")]
+
+
+def test_model_convert_rejects_shape_hint_for_overwritten_input(capsys, tmp_path):
+    model = tmp_path / "model.onnx"
+    output = tmp_path / "converted"
+    model.write_bytes(b"onnx")
+
+    exit_code = cli_module.main(
+        [
+            "model",
+            "convert",
+            "--",
+            str(model),
+            "--output",
+            str(output),
+            "--input-shape",
+            "images:1,3,640,640",
+            "--shape-hint=images:1,3,640,640",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "PSM_ONNX_CONVERT" in captured.err
+    assert "Do not pass both --input-shape and --shape-hint" in captured.err
+    assert "images" in captured.err
+
+
+def test_model_convert_allows_shape_hint_for_different_input(monkeypatch, tmp_path):
+    model = tmp_path / "model.onnx"
+    output = tmp_path / "converted"
+    model.write_bytes(b"onnx")
+    calls = []
+
+    def _convert_onnx_to_tflite(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            model=kwargs["model"],
+            output=kwargs["output"],
+            tflite_models=[output / "model.tflite"],
+            argv=[],
+            stdout="",
+            stderr="",
+            tool=SimpleNamespace(path=tmp_path / "onnx2tf", managed=True),
+        )
+
+    monkeypatch.setattr(cli_module.onnx_tools, "convert_onnx_to_tflite", _convert_onnx_to_tflite)
+
+    assert cli_module.main(
+        [
+            "model",
+            "convert",
+            "--",
+            str(model),
+            "--output",
+            str(output),
+            "--input-shape=images:1,3,640,640",
+            "--shape-hint",
+            "tokens:1,128",
+        ]
+    ) == 0
+
+    assert calls[0]["extra_args"] == [
+        "--overwrite_input_shape",
+        "images:1,3,640,640",
+        "--shape_hints",
+        "tokens:1,128",
+    ]
 
 
 def test_model_info_command_prints_model_metadata(capsys):
@@ -405,6 +745,60 @@ def test_pipeline_builder_commands_create_validate_and_inspect_pipeline(capsys, 
     assert "Operators: 2" in captured.out
 
 
+def test_pipeline_add_op_arithmetic_requires_expression(capsys, tmp_path):
+    pipeline = tmp_path / "pipeline.json"
+
+    assert cli_module.main(["pipeline", "init", str(pipeline)]) == 0
+    assert cli_module.main(
+        ["pipeline", "add-tensor", str(pipeline), "x", "--shape", "2,2", "--dtype", "float32", "--input"]
+    ) == 0
+    assert cli_module.main(
+        ["pipeline", "add-tensor", str(pipeline), "y", "--shape", "2,2", "--dtype", "float32", "--output"]
+    ) == 0
+
+    exit_code = cli_module.main(["pipeline", "add-op", str(pipeline), "arithmetic", "--input", "x", "--output", "y"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "PSM_PIPELINE" in captured.err
+    assert "Arithmetic operators require --expression" in captured.err
+
+
+def test_pipeline_add_op_javascript_requires_code(capsys, tmp_path):
+    pipeline = tmp_path / "pipeline.json"
+
+    assert cli_module.main(["pipeline", "init", str(pipeline)]) == 0
+    assert cli_module.main(
+        ["pipeline", "add-tensor", str(pipeline), "x", "--shape", "2,2", "--dtype", "float32", "--input"]
+    ) == 0
+    assert cli_module.main(
+        ["pipeline", "add-tensor", str(pipeline), "y", "--shape", "2,2", "--dtype", "float32", "--output"]
+    ) == 0
+
+    exit_code = cli_module.main(["pipeline", "add-op", str(pipeline), "javascript", "--input", "x", "--output", "y"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "PSM_PIPELINE" in captured.err
+    assert "javascript operators require --attr with JavaScript code" in captured.err
+
+
+def test_pipeline_add_op_convert_color_requires_input(capsys, tmp_path):
+    pipeline = tmp_path / "pipeline.json"
+
+    assert cli_module.main(["pipeline", "init", str(pipeline)]) == 0
+    assert cli_module.main(
+        ["pipeline", "add-tensor", str(pipeline), "y", "--shape", "2,2,3", "--dtype", "uint8", "--output"]
+    ) == 0
+
+    exit_code = cli_module.main(["pipeline", "add-op", str(pipeline), "convert_color", "--output", "y", "--flag", "4"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "PSM_PIPELINE" in captured.err
+    assert "convert_color operators require exactly 1 input" in captured.err
+
+
 def test_pipeline_commands_json_output(capsys, tmp_path):
     pipeline = tmp_path / "pipeline.json"
 
@@ -432,10 +826,62 @@ def test_pipeline_commands_json_output(capsys, tmp_path):
     assert payload["command"] == "pipeline.add_tensor"
     assert payload["tensor"] == "x"
 
+    assert cli_module.main(["pipeline", "remove-tensor", str(pipeline), "x", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["command"] == "pipeline.remove_tensor"
+    assert payload["tensor"] == "x"
+    assert payload["force"] is False
+
+    assert cli_module.main(
+        [
+            "pipeline",
+            "add-tensor",
+            str(pipeline),
+            "x",
+            "--shape",
+            "2,2",
+            "--dtype",
+            "float32",
+            "--input",
+        ]
+    ) == 0
+
+    assert cli_module.main(
+        [
+            "pipeline",
+            "add-tensor",
+            str(pipeline),
+            "y",
+            "--shape",
+            "2,2",
+            "--dtype",
+            "float32",
+            "--output",
+        ]
+    ) == 0
+    assert cli_module.main(
+        [
+            "pipeline",
+            "add-op",
+            str(pipeline),
+            "assignment",
+            "--input",
+            "x",
+            "--output",
+            "y",
+        ]
+    ) == 0
+    capsys.readouterr()
+    assert cli_module.main(["pipeline", "remove-op", str(pipeline), "--index", "0", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["command"] == "pipeline.remove_op"
+    assert payload["index"] == 0
+
     assert cli_module.main(["pipeline", "inspect", str(pipeline), "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["command"] == "pipeline.inspect"
-    assert payload["tensors"] == 1
+    assert payload["tensors"] == 2
+    assert payload["operators"] == 0
     assert payload["inputs"] == ["x"]
 
 
@@ -599,6 +1045,61 @@ def test_package_create_validate_and_inspect_commands(capsys, tmp_path):
     assert packaged_pipeline["operators"][0]["model"]["bin_path"] == "model/face.tflite"
     assert "Package: face-demo" in captured.out
     assert "main -> pipeline/main.json" in captured.out
+
+
+def test_package_create_from_existing_source_package(tmp_path):
+    pipeline = tmp_path / "pipeline.json"
+    model = tmp_path / "face.tflite"
+    source = tmp_path / "source-package"
+    archive = tmp_path / "source-package.zip"
+    pipeline.write_text(
+        json.dumps(
+            {
+                "tensors": {},
+                "operators": [
+                    {
+                        "type": "XR_SECURE_MR_OPERATOR_TYPE_RUN_MODEL_INFERENCE_PICO",
+                        "inputs": [],
+                        "outputs": [],
+                        "model_type": "tflite",
+                        "model": {
+                            "bin_path": "face.tflite",
+                            "model_name": "face",
+                            "model_type": "tflite",
+                        },
+                    }
+                ],
+                "inputs": [],
+                "outputs": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    model.write_bytes(b"model")
+
+    assert cli_module.main(
+        [
+            "package",
+            "create",
+            "--id",
+            "face-demo",
+            "--pipeline",
+            f"main={pipeline}",
+            "--output",
+            str(source),
+        ]
+    ) == 0
+    assert cli_module.main(
+        [
+            "package",
+            "create",
+            str(source),
+            "--output",
+            str(archive),
+            "--yes",
+        ]
+    ) == 0
+    assert cli_module.main(["package", "validate", str(archive)]) == 0
 
 
 def test_package_inspect_json(capsys, tmp_path):
@@ -793,12 +1294,13 @@ def test_run_host_command_runs_pipeline_and_saves_outputs(capsys, tmp_path):
     import numpy as np
 
     np.save(sample, np.ones((2, 2), dtype=np.float32))
+    package = _create_cli_run_package(tmp_path, pipeline)
 
     assert cli_module.main(
         [
             "run",
             "host",
-            str(pipeline),
+            str(package),
             "--input",
             f"x={sample}",
             "--output-dir",
@@ -807,7 +1309,7 @@ def test_run_host_command_runs_pipeline_and_saves_outputs(capsys, tmp_path):
     ) == 0
 
     captured = capsys.readouterr()
-    np.testing.assert_allclose(np.load(output_dir / "y.npy"), np.ones((2, 2), dtype=np.float32) + 3.0)
+    np.testing.assert_allclose(np.load(output_dir / "main" / "y.npy"), np.ones((2, 2), dtype=np.float32) + 3.0)
     assert "Outputs: 1" in captured.out
     assert "y: shape=(2, 2)" in captured.out
 
@@ -852,12 +1354,14 @@ def test_run_host_command_json_wraps_summary(capsys, tmp_path):
     import numpy as np
 
     np.save(sample, np.ones((2, 2), dtype=np.float32))
+    package = _create_cli_run_package(tmp_path, pipeline)
+    capsys.readouterr()
 
     assert cli_module.main(
         [
             "run",
             "host",
-            str(pipeline),
+            str(package),
             "--input",
             f"x={sample}",
             "--output-dir",
@@ -869,7 +1373,7 @@ def test_run_host_command_json_wraps_summary(capsys, tmp_path):
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["command"] == "run.host"
-    assert payload["target"] == str(pipeline)
+    assert payload["target"] == str(package)
     assert "Host Run Summary" in payload["stdout"]
 
 
@@ -919,6 +1423,7 @@ def test_run_host_command_runs_model_operator_with_litert(monkeypatch, tmp_path)
     import numpy as np
 
     np.save(sample, np.ones((2, 2), dtype=np.float32))
+    package = _create_cli_run_package(tmp_path, pipeline)
 
     monkeypatch.setattr(cli_module.run_cli, "resolve_litert_cli", lambda ensure=True: object())
 
@@ -931,7 +1436,7 @@ def test_run_host_command_runs_model_operator_with_litert(monkeypatch, tmp_path)
         [
             "run",
             "host",
-            str(pipeline),
+            str(package),
             "--input",
             f"x={sample}",
             "--output-dir",
@@ -939,7 +1444,7 @@ def test_run_host_command_runs_model_operator_with_litert(monkeypatch, tmp_path)
         ]
     ) == 0
 
-    np.testing.assert_allclose(np.load(output_dir / "scores.npy"), np.ones((2, 2), dtype=np.float32) * 4.0)
+    np.testing.assert_allclose(np.load(output_dir / "main" / "scores.npy"), np.ones((2, 2), dtype=np.float32) * 4.0)
 
 
 def test_run_host_command_dump_all(tmp_path):
@@ -982,12 +1487,13 @@ def test_run_host_command_dump_all(tmp_path):
     import numpy as np
 
     np.save(sample, np.ones((2, 2), dtype=np.float32))
+    package = _create_cli_run_package(tmp_path, pipeline)
 
     assert cli_module.main(
         [
             "run",
             "host",
-            str(pipeline),
+            str(package),
             "--input",
             f"x={sample}",
             "--dump",
@@ -997,8 +1503,8 @@ def test_run_host_command_dump_all(tmp_path):
         ]
     ) == 0
 
-    assert (output_dir / "all_tensors" / "x.npy").is_file()
-    assert (output_dir / "all_tensors" / "y.npy").is_file()
+    assert (output_dir / "main" / "all_tensors" / "x.npy").is_file()
+    assert (output_dir / "main" / "all_tensors" / "y.npy").is_file()
 
 
 def test_run_host_command_writes_display_summary(tmp_path):
@@ -1044,14 +1550,18 @@ def test_run_host_command_writes_display_summary(tmp_path):
     )
     import numpy as np
 
+    asset = tmp_path / "gltf" / "frame.gltf"
+    asset.parent.mkdir()
+    asset.write_text("{}", encoding="utf-8")
     pose = np.eye(4, dtype=np.float32)
     np.save(sample, pose)
+    package = _create_cli_run_package(tmp_path, pipeline)
 
     assert cli_module.main(
         [
             "run",
             "host",
-            str(pipeline),
+            str(package),
             "--input",
             f"pose_in={sample}",
             "--output-dir",
@@ -1059,7 +1569,7 @@ def test_run_host_command_writes_display_summary(tmp_path):
         ]
     ) == 0
 
-    assert (output_dir / "display_summary.json").is_file()
+    assert (output_dir / "main" / "display_summary.json").is_file()
 
 
 def test_run_host_command_writes_post_det_json(tmp_path):
@@ -1102,12 +1612,13 @@ def test_run_host_command_writes_post_det_json(tmp_path):
 
     values = np.arange(21, dtype=np.float32).reshape(1, 21)
     np.save(sample, values)
+    package = _create_cli_run_package(tmp_path, pipeline)
 
     assert cli_module.main(
         [
             "run",
             "host",
-            str(pipeline),
+            str(package),
             "--input",
             f"post_det_input={sample}",
             "--output-dir",
@@ -1115,7 +1626,7 @@ def test_run_host_command_writes_post_det_json(tmp_path):
         ]
     ) == 0
 
-    decoded = json.loads((output_dir / "post_det.json").read_text(encoding="utf-8"))
+    decoded = json.loads((output_dir / "main" / "post_det.json").read_text(encoding="utf-8"))
     assert decoded["bbox"] == {"x1": 0.0, "y1": 1.0, "x2": 2.0, "y2": 3.0}
     assert decoded["keypoints"][0] == {"index": 0, "x": 6.0, "y": 7.0, "score": 8.0}
 
@@ -1307,7 +1818,7 @@ def test_run_host_command_reports_errors(capsys, tmp_path):
     captured = capsys.readouterr()
     assert exit_code == 1
     assert "PSM_RUN" in captured.err
-    assert "not a pipeline JSON or package" in captured.err
+    assert "Run targets must be a SpatialML pipeline package directory" in captured.err
 
 
 def test_run_device_command_forwards_options(monkeypatch, tmp_path):

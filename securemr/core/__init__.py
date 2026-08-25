@@ -11,8 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Core SecureMR helpers that do not require native bindings."""
+"""Core SecureMR helpers."""
 
-from .types import BaseType, EDataType, EOperatorType, BINDINGS_AVAILABLE
+from .types import BaseType, EDataType, EOperatorType
 
-__all__ = ["BaseType", "EDataType", "EOperatorType", "BINDINGS_AVAILABLE"]
+__all__ = ["BaseType", "EDataType", "EOperatorType"]

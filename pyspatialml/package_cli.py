@@ -22,6 +22,7 @@ import sys
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from tempfile import TemporaryDirectory
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from securemr.pipeline_zoo import (
@@ -63,6 +64,16 @@ _GLTF_KEYS = {
     "scene",
     "scene_path",
 }
+_XR_ONLY_OPERATORS = {
+    "LOAD_TEXTURE",
+    "RENDER_TEXT",
+    "SWITCH_GLTF_RENDER_STATUS",
+    "UPDATE_GLTF",
+}
+_SPATIAL_ONLY_OPERATORS = {
+    "SCENEGRAPH_VISIBILITY",
+    "UPDATE_COMPONENT",
+}
 
 
 def create_package(
@@ -70,6 +81,7 @@ def create_package(
     package_id: str,
     pipelines: Sequence[str],
     output: Path,
+    source: Optional[Path] = None,
     supported_modes: Sequence[str] = (),
     asset_roots: Sequence[Path] = (),
     force: bool = False,
@@ -77,6 +89,16 @@ def create_package(
     assume_yes: bool = False,
 ) -> int:
     """Create a schema-v2 SpatialML package directory or zip."""
+    if source is not None and _looks_like_existing_package(source):
+        return _copy_existing_package(
+            source=source,
+            output=output,
+            force=force,
+            zip_output=zip_output,
+            assume_yes=assume_yes,
+        )
+    if source is not None:
+        asset_roots = [source, *asset_roots]
     if not package_id:
         raise PackageCliError("Package id is required")
     pipeline_inputs = [_parse_pipeline_arg(item) for item in pipelines]
@@ -105,6 +127,7 @@ def create_package(
     package_root.mkdir(parents=True, exist_ok=True)
     manifest_entries: list[PipelinePackageEntry] = []
     copied_assets: dict[str, Path] = {}
+    packaged_pipeline_specs: list[tuple[str, Mapping[str, Any]]] = []
 
     for item in pipeline_inputs:
         source_pipeline = item.source
@@ -122,13 +145,18 @@ def create_package(
         )
         _write_json(package_root / package_pipeline_path, normalized_spec)
         manifest_entries.append(PipelinePackageEntry(item.id, package_pipeline_path))
+        packaged_pipeline_specs.append((item.id, normalized_spec))
 
     package = PipelineZooPackageSpec(
         package_id=package_id,
         supported_modes=supported_modes,
         pipelines=manifest_entries,
     )
-    _write_json(package_root / "manifest.json", package.to_manifest_dict())
+    manifest = package.to_manifest_dict()
+    inferred_modes = _validate_pipeline_modes(manifest, packaged_pipeline_specs)
+    if not supported_modes:
+        manifest.setdefault("runtime", {})["supported_modes"] = inferred_modes
+    _write_json(package_root / "manifest.json", manifest)
 
     for package_path, source_path in copied_assets.items():
         destination = _package_destination(package_root, package_path)
@@ -143,21 +171,163 @@ def create_package(
     return 0
 
 
+def _copy_existing_package(
+    *,
+    source: Path,
+    output: Path,
+    force: bool,
+    zip_output: bool,
+    assume_yes: bool,
+) -> int:
+    source_root = _materialize_package(source)
+    if not (source_root / "manifest.json").is_file():
+        raise PackageCliError(f"Package manifest not found: {source_root / 'manifest.json'}")
+    manifest = _load_validated_manifest(source_root)
+    try:
+        _validate_package_root(source_root, manifest)
+    except PackageCliError:
+        if not force:
+            raise
+        needs_reconcile = True
+    else:
+        needs_reconcile = False
+
+    package_root = output
+    archive_path: Optional[Path] = None
+    if zip_output or output.suffix == ".zip":
+        archive_path = output
+        package_root = output.with_suffix("")
+
+    same_package_root = source_root.resolve() == package_root.resolve()
+    if needs_reconcile:
+        if package_root.exists() and same_package_root and archive_path is None:
+            raise PackageCliError("Source package and output package directory are the same")
+        if package_root.exists() and not same_package_root and not force and not _confirm_overwrite(
+            package_root, assume_yes=assume_yes
+        ):
+            raise PackageCliError(f"Output package already exists: {package_root}")
+        if archive_path and archive_path.exists() and not force and not _confirm_overwrite(
+            archive_path, assume_yes=assume_yes
+        ):
+            raise PackageCliError(f"Output archive already exists: {archive_path}")
+        return _copy_existing_package_with_reconcile(
+            source_root=source_root,
+            package_root=package_root,
+            archive_path=archive_path,
+            same_package_root=same_package_root,
+        )
+
+    if package_root.exists():
+        if same_package_root:
+            if archive_path is None:
+                raise PackageCliError("Source package and output package directory are the same")
+        elif not force and not _confirm_overwrite(package_root, assume_yes=assume_yes):
+            raise PackageCliError(f"Output package already exists: {package_root}")
+        elif package_root.is_dir():
+            shutil.rmtree(package_root)
+        else:
+            package_root.unlink()
+    if archive_path and archive_path.exists():
+        if not force and not _confirm_overwrite(archive_path, assume_yes=assume_yes):
+            raise PackageCliError(f"Output archive already exists: {archive_path}")
+        archive_path.unlink()
+
+    if not same_package_root:
+        shutil.copytree(source_root, package_root)
+
+    if archive_path:
+        _zip_directory(package_root, archive_path)
+        print(f"Created package archive: {archive_path}")
+    else:
+        print(f"Created package: {package_root}")
+    return 0
+
+
+def _copy_existing_package_with_reconcile(
+    *,
+    source_root: Path,
+    package_root: Path,
+    archive_path: Optional[Path],
+    same_package_root: bool,
+) -> int:
+    with TemporaryDirectory(prefix="pyspatialml-package-") as tmp:
+        staged_root = Path(tmp) / "package"
+        shutil.copytree(source_root, staged_root)
+        _reconcile_existing_package_root(staged_root)
+
+        if not same_package_root:
+            if package_root.exists():
+                if package_root.is_dir():
+                    shutil.rmtree(package_root)
+                else:
+                    package_root.unlink()
+            shutil.copytree(staged_root, package_root)
+            archive_root = package_root
+        else:
+            archive_root = staged_root
+
+        if archive_path:
+            if archive_path.exists():
+                archive_path.unlink()
+            _zip_directory(archive_root, archive_path)
+            print(f"Created package archive: {archive_path}")
+        else:
+            print(f"Created package: {package_root}")
+    return 0
+
+
+def _reconcile_existing_package_root(root: Path) -> None:
+    manifest = _load_validated_manifest(root)
+    _reconcile_manifest_modes(root, manifest)
+    _write_json(root / "manifest.json", manifest)
+    _validate_package_root(root, manifest)
+
+
+def _looks_like_existing_package(path: Path) -> bool:
+    if path.is_file() and path.suffix == ".zip":
+        return True
+    if path.is_dir() and (path / "manifest.json").is_file():
+        return True
+    return False
+
+
 def validate_package(path: Path) -> int:
     """Validate a package directory or zip archive."""
     root = _materialize_package(path)
     manifest = _load_validated_manifest(root)
+    _validate_package_root(root, manifest)
+    print(f"Package is valid: {path}")
+    return 0
+
+
+def _validate_package_root(root: Path, manifest: Mapping[str, Any]) -> None:
+    pipeline_specs: list[tuple[str, Mapping[str, Any]]] = []
+    _collect_package_pipeline_specs(root, manifest, pipeline_specs)
+    _validate_pipeline_modes(manifest, pipeline_specs)
+
+
+def _collect_package_pipeline_specs(
+    root: Path,
+    manifest: Mapping[str, Any],
+    pipeline_specs: list[tuple[str, Mapping[str, Any]]],
+) -> None:
     for pipeline in manifest["pipelines"]:
-        pipeline_path = root / pipeline["path"]
+        pipeline_path = _resolve_package_file(root, str(pipeline["path"]), label="pipeline")
         if not pipeline_path.is_file():
             raise PackageCliError(f"Manifest references missing pipeline: {pipeline['path']}")
         spec = _read_json(pipeline_path)
         validate_pipeline_spec(spec)
+        pipeline_specs.append((str(pipeline["id"]), spec))
         for asset in _iter_pipeline_asset_refs(spec):
-            if not (root / asset).is_file():
+            asset_path = _resolve_package_file(root, asset, label="asset")
+            if not asset_path.is_file():
                 raise PackageCliError(f"Pipeline references missing package asset: {asset}")
-    print(f"Package is valid: {path}")
-    return 0
+
+
+def _reconcile_manifest_modes(root: Path, manifest: dict[str, Any]) -> None:
+    pipeline_specs: list[tuple[str, Mapping[str, Any]]] = []
+    _collect_package_pipeline_specs(root, manifest, pipeline_specs)
+    manifest.setdefault("runtime", {})["supported_modes"] = _infer_pipeline_modes(pipeline_specs)
 
 
 def inspect_package(path: Path) -> int:
@@ -190,7 +360,7 @@ def print_package_error(exc: Exception) -> None:
 def _load_validated_manifest(root: Path) -> dict[str, Any]:
     try:
         return load_pipeline_zoo_manifest(root)
-    except ValueError as exc:
+    except (OSError, ValueError) as exc:
         raise PackageCliError(str(exc)) from exc
 
 
@@ -342,6 +512,102 @@ def _iter_pipeline_asset_refs(spec: Mapping[str, Any]) -> Iterable[str]:
                 yield _normalize_package_path(str(tensor["asset"]))
 
 
+def _validate_pipeline_modes(
+    manifest: Mapping[str, Any],
+    pipeline_specs: Sequence[tuple[str, Mapping[str, Any]]],
+) -> list[str]:
+    runtime = manifest.get("runtime", {})
+    supported_modes = runtime.get("supported_modes", []) if isinstance(runtime, Mapping) else []
+    modes = {str(mode).strip().lower() for mode in supported_modes}
+
+    xr_only = []
+    spatial_only = []
+    for pipeline_id, spec in pipeline_specs:
+        for op_type in _pipeline_operator_type_names(spec):
+            if op_type in _XR_ONLY_OPERATORS:
+                xr_only.append((pipeline_id, op_type))
+            if op_type in _SPATIAL_ONLY_OPERATORS:
+                spatial_only.append((pipeline_id, op_type))
+
+    if xr_only and spatial_only:
+        xr_details = _format_mode_operator_details(xr_only)
+        spatial_details = _format_mode_operator_details(spatial_only)
+        raise PackageCliError(
+            "Package pipelines mix XR-only and Spatial-only operators. "
+            f"XR-only: {xr_details}. Spatial-only: {spatial_details}."
+        )
+
+    inferred_modes = _infer_supported_modes(xr_only=xr_only, spatial_only=spatial_only)
+    if not modes:
+        return inferred_modes
+    if "spatial" in modes and xr_only:
+        details = _format_mode_operator_details(xr_only)
+        raise PackageCliError(
+            "Manifest runtime.supported_modes includes spatial, but package uses XR-only operators: "
+            f"{details}. Remove spatial from supported modes or remove the XR-only operators."
+        )
+    if "xr" in modes and spatial_only:
+        details = _format_mode_operator_details(spatial_only)
+        raise PackageCliError(
+            "Manifest runtime.supported_modes includes xr, but package uses Spatial-only operators: "
+            f"{details}. Remove xr from supported modes or remove the Spatial-only operators."
+        )
+    return list(supported_modes)
+
+
+def _infer_supported_modes(
+    *,
+    xr_only: Sequence[tuple[str, str]],
+    spatial_only: Sequence[tuple[str, str]],
+) -> list[str]:
+    if xr_only:
+        return ["xr"]
+    if spatial_only:
+        return ["spatial"]
+    return ["xr", "spatial"]
+
+
+def _infer_pipeline_modes(pipeline_specs: Sequence[tuple[str, Mapping[str, Any]]]) -> list[str]:
+    xr_only = []
+    spatial_only = []
+    for pipeline_id, spec in pipeline_specs:
+        for op_type in _pipeline_operator_type_names(spec):
+            if op_type in _XR_ONLY_OPERATORS:
+                xr_only.append((pipeline_id, op_type))
+            if op_type in _SPATIAL_ONLY_OPERATORS:
+                spatial_only.append((pipeline_id, op_type))
+    if xr_only and spatial_only:
+        xr_details = _format_mode_operator_details(xr_only)
+        spatial_details = _format_mode_operator_details(spatial_only)
+        raise PackageCliError(
+            "Package pipelines mix XR-only and Spatial-only operators. "
+            f"XR-only: {xr_details}. Spatial-only: {spatial_details}."
+        )
+    return _infer_supported_modes(xr_only=xr_only, spatial_only=spatial_only)
+
+
+def _pipeline_operator_type_names(spec: Mapping[str, Any]) -> Iterable[str]:
+    for op in spec.get("operators", []):
+        if not isinstance(op, Mapping):
+            continue
+        op_type = _normalize_operator_type_name(str(op.get("type") or op.get("operator_type") or ""))
+        if op_type:
+            yield op_type
+
+
+def _normalize_operator_type_name(value: str) -> str:
+    normalized = value.strip().upper()
+    if normalized.startswith("XR_SECURE_MR_OPERATOR_TYPE_"):
+        normalized = normalized[len("XR_SECURE_MR_OPERATOR_TYPE_") :]
+    if normalized.endswith("_PICO"):
+        normalized = normalized[: -len("_PICO")]
+    return normalized
+
+
+def _format_mode_operator_details(items: Sequence[tuple[str, str]]) -> str:
+    return ", ".join(f"{pipeline}:{op_type}" for pipeline, op_type in items)
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     with open(path, "r", encoding="utf-8") as file:
         payload = json.load(file)
@@ -367,7 +633,24 @@ def _package_destination(root: Path, package_path: str) -> Path:
     return destination
 
 
+def _resolve_package_file(root: Path, package_path: str, *, label: str) -> Path:
+    path = Path(package_path)
+    if path.is_absolute():
+        raise PackageCliError(f"Package {label} path must be package-relative: {package_path}")
+    normalized = _normalize_package_path(package_path)
+    resolved_root = root.resolve()
+    resolved_path = (root / normalized).resolve()
+    try:
+        resolved_path.relative_to(resolved_root)
+    except ValueError as exc:
+        raise PackageCliError(f"Package {label} path escapes package root: {package_path}") from exc
+    return resolved_path
+
+
 def _normalize_package_path(path: str) -> str:
+    raw_path = Path(path)
+    if raw_path.is_absolute() or path.replace("\\", "/").startswith("/"):
+        raise PackageCliError(f"Invalid package-relative path: {path}")
     normalized = path.replace("\\", "/").strip("/")
     if not normalized:
         raise PackageCliError("Package paths must not be empty")

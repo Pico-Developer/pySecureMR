@@ -18,6 +18,30 @@ def _write_json(path, payload):
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+def _package_pipeline(tmp_path, pipeline, *, package_id="demo", pipeline_id="main"):
+    package = tmp_path / f"{package_id}-package"
+    package_cli.create_package(
+        package_id=package_id,
+        pipelines=[f"{pipeline_id}={pipeline}"],
+        output=package,
+    )
+    return package
+
+
+def _package_output(output_dir, pipeline_id="main"):
+    return output_dir / pipeline_id
+
+
+def _write_device_package_manifest(package, *, pipeline_id="main"):
+    package.mkdir()
+    pipeline_path = package / "pipeline" / f"{pipeline_id}.json"
+    _write_json(pipeline_path, _simple_pipeline())
+    _write_json(
+        package / "manifest.json",
+        {"id": "demo", "pipelines": [{"id": pipeline_id, "path": f"pipeline/{pipeline_id}.json"}]},
+    )
+
+
 def _simple_pipeline():
     return {
         "tensors": {
@@ -96,20 +120,20 @@ def test_run_host_pipeline_json_prints_summary_and_saves_outputs(capsys, tmp_pat
     np.save(sample, np.ones((2, 2), dtype=np.float32))
 
     assert run_cli.run_host(
-        pipeline,
+        _package_pipeline(tmp_path, pipeline),
         inputs=[f"x={sample}"],
         output_dir=output_dir,
     ) == 0
 
     captured = capsys.readouterr()
-    output = np.load(output_dir / "y.npy")
+    output = np.load(_package_output(output_dir) / "y.npy")
     np.testing.assert_allclose(output, np.ones((2, 2), dtype=np.float32) * 2.0)
     assert "Outputs: 1" in captured.out
     assert "y: shape=(2, 2) dtype=float32" in captured.out
     assert "mean=2" in captured.out
     assert "preview=[2, 2, 2, 2]" in captured.out
     assert "Host Run Summary" in captured.out
-    assert "pipeline:" in captured.out
+    assert "main:" in captured.out
     assert "Total host run time:" in captured.out
 
 
@@ -148,7 +172,7 @@ def test_run_host_summary_marks_all_zero_and_truncated_preview(capsys, tmp_path)
     )
     np.save(sample, np.zeros((1, 10), dtype=np.float32))
 
-    assert run_cli.run_host(pipeline, inputs=[f"x={sample}"]) == 0
+    assert run_cli.run_host(_package_pipeline(tmp_path, pipeline), inputs=[f"x={sample}"]) == 0
 
     captured = capsys.readouterr()
     assert "all_zero=true" in captured.out
@@ -176,9 +200,9 @@ def test_run_host_accepts_schema_v2_generic_elementwise(tmp_path):
     np.save(a, np.ones((2, 2), dtype=np.float32) * 2)
     np.save(b, np.ones((2, 2), dtype=np.float32) * 3)
 
-    assert run_cli.run_host(pipeline, inputs=[f"a={a}", f"b={b}"], output_dir=output_dir) == 0
+    assert run_cli.run_host(_package_pipeline(tmp_path, pipeline), inputs=[f"a={a}", f"b={b}"], output_dir=output_dir) == 0
 
-    np.testing.assert_allclose(np.load(output_dir / "y.npy"), np.ones((2, 2), dtype=np.float32) * 6)
+    np.testing.assert_allclose(np.load(_package_output(output_dir) / "y.npy"), np.ones((2, 2), dtype=np.float32) * 6)
 
 
 def test_run_host_preserves_supplied_rectified_vst_outputs(tmp_path):
@@ -243,15 +267,15 @@ def test_run_host_preserves_supplied_rectified_vst_outputs(tmp_path):
     np.save(right, right_value)
 
     assert run_cli.run_host(
-        pipeline,
+        _package_pipeline(tmp_path, pipeline),
         inputs=[f"vst_left_image={left}", f"vst_right_image={right}"],
         output_dir=output_dir,
     ) == 0
 
-    np.testing.assert_array_equal(np.load(output_dir / "vst_left_image.npy"), left_value)
-    np.testing.assert_array_equal(np.load(output_dir / "vst_right_image.npy"), right_value)
-    assert (output_dir / "vst_timestamp.npy").is_file()
-    assert (output_dir / "vst_camera_matrix.npy").is_file()
+    np.testing.assert_array_equal(np.load(_package_output(output_dir) / "vst_left_image.npy"), left_value)
+    np.testing.assert_array_equal(np.load(_package_output(output_dir) / "vst_right_image.npy"), right_value)
+    assert (_package_output(output_dir) / "vst_timestamp.npy").is_file()
+    assert (_package_output(output_dir) / "vst_camera_matrix.npy").is_file()
 
 
 def test_run_host_resizes_supplied_image_input_to_tensor_shape(tmp_path):
@@ -277,9 +301,9 @@ def test_run_host_resizes_supplied_image_input_to_tensor_shape(tmp_path):
     )
     np.save(left, np.ones((30, 40, 3), dtype=np.uint8) * 11)
 
-    assert run_cli.run_host(pipeline, inputs=[f"vst_left_image={left}"], output_dir=output_dir) == 0
+    assert run_cli.run_host(_package_pipeline(tmp_path, pipeline), inputs=[f"vst_left_image={left}"], output_dir=output_dir) == 0
 
-    output = np.load(output_dir / "vst_left_image.npy")
+    output = np.load(_package_output(output_dir) / "vst_left_image.npy")
     assert output.shape == (3, 4, 3)
     assert output.dtype == np.uint8
 
@@ -311,10 +335,10 @@ def test_run_host_bare_image_input_feeds_rectified_vst(tmp_path):
     )
     cv2.imwrite(str(image), np.ones((4, 5, 3), dtype=np.uint8) * 23)
 
-    assert run_cli.run_host(pipeline, inputs=[str(image)], output_dir=output_dir) == 0
+    assert run_cli.run_host(_package_pipeline(tmp_path, pipeline), inputs=[str(image)], output_dir=output_dir) == 0
 
-    left = np.load(output_dir / "vst_left_image.npy")
-    right = np.load(output_dir / "vst_right_image.npy")
+    left = np.load(_package_output(output_dir) / "vst_left_image.npy")
+    right = np.load(_package_output(output_dir) / "vst_right_image.npy")
     assert left.shape == (2, 3, 3)
     np.testing.assert_array_equal(left, right)
     assert np.max(left) > 0
@@ -353,10 +377,40 @@ def test_run_host_bare_image_input_binds_vst_image_tensors_without_operator(tmp_
         },
     )
 
-    assert run_cli.run_host(pipeline, inputs=[str(image_path)], output_dir=output_dir) == 0
+    assert run_cli.run_host(_package_pipeline(tmp_path, pipeline), inputs=[str(image_path)], output_dir=output_dir) == 0
 
-    np.testing.assert_array_equal(np.load(output_dir / "vst_left_image.npy"), image)
-    np.testing.assert_array_equal(np.load(output_dir / "vst_right_image.npy"), image)
+    np.testing.assert_array_equal(np.load(_package_output(output_dir) / "vst_left_image.npy"), image)
+    np.testing.assert_array_equal(np.load(_package_output(output_dir) / "vst_right_image.npy"), image)
+
+
+def test_run_host_bare_input_feeds_declared_input_tensor(tmp_path):
+    pipeline = tmp_path / "simple.json"
+    sample = tmp_path / "x.npy"
+    output_dir = tmp_path / "outputs"
+    _write_json(
+        pipeline,
+        {
+            "tensors": {
+                "x": {"dimensions": [2, 2], "channels": 1, "data_type": 6, "is_placeholder": True, "usage": 6},
+                "y": {"dimensions": [2, 2], "channels": 1, "data_type": 6, "is_placeholder": True, "usage": 6},
+            },
+            "operators": [
+                {
+                    "type": "XR_SECURE_MR_OPERATOR_TYPE_ARITHMETIC_COMPOSE_PICO",
+                    "inputs": ["x"],
+                    "outputs": ["y"],
+                    "expression": "{0} * 2.0",
+                }
+            ],
+            "inputs": ["x"],
+            "outputs": ["y"],
+        },
+    )
+    np.save(sample, np.ones((2, 2), dtype=np.float32))
+
+    assert run_cli.run_host(_package_pipeline(tmp_path, pipeline), inputs=[str(sample)], output_dir=output_dir) == 0
+
+    np.testing.assert_allclose(np.load(_package_output(output_dir) / "y.npy"), np.ones((2, 2), dtype=np.float32) * 2.0)
 
 
 def test_run_host_model_operator_uses_litert_runner(monkeypatch, capsys, tmp_path):
@@ -413,14 +467,15 @@ def test_run_host_model_operator_uses_litert_runner(monkeypatch, capsys, tmp_pat
 
     monkeypatch.setattr(run_cli, "_run_litert_runtime_model", _run_litert_runtime_model)
 
-    assert run_cli.run_host(pipeline, inputs=[f"x={sample}"], output_dir=output_dir) == 0
+    package = _package_pipeline(tmp_path, pipeline)
+    assert run_cli.run_host(package, inputs=[f"x={sample}"], output_dir=output_dir) == 0
 
     captured = capsys.readouterr()
-    np.testing.assert_allclose(np.load(output_dir / "scores.npy"), np.ones((2, 2), dtype=np.float32) * 3.0)
+    np.testing.assert_allclose(np.load(_package_output(output_dir) / "scores.npy"), np.ones((2, 2), dtype=np.float32) * 3.0)
     assert "RUN_MODEL_INFERENCE demo:" in captured.out
     assert "target=cpu" in captured.out
     assert calls
-    assert calls[0]["model_path"] == model
+    assert calls[0]["model_path"] == (package / "model" / "demo.tflite").resolve()
     assert list(calls[0]["inputs"]) == ["input"]
     assert calls[0]["output_names"] == ["scores"]
 
@@ -476,7 +531,7 @@ def test_run_host_model_operator_reports_litert_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(run_cli, "_run_litert_runtime_model", _fail_model)
 
     with pytest.raises(run_cli.RunCliError, match="LiteRT model run failed"):
-        run_cli.run_host(pipeline, inputs=[f"x={sample}"])
+        run_cli.run_host(_package_pipeline(tmp_path, pipeline), inputs=[f"x={sample}"])
 
 
 def test_run_host_face_fixture_runs_real_litert_model(tmp_path):
@@ -515,14 +570,14 @@ def test_run_host_dumps_selected_tensor(tmp_path):
     np.save(sample, np.ones((2, 2), dtype=np.float32))
 
     assert run_cli.run_host(
-        pipeline,
+        _package_pipeline(tmp_path, pipeline),
         inputs=[f"x={sample}"],
         output_dir=output_dir,
         dumps=["x"],
     ) == 0
 
-    np.testing.assert_allclose(np.load(output_dir / "dumped" / "x.npy"), np.ones((2, 2), dtype=np.float32))
-    assert not (output_dir / "dumped" / "y.npy").exists()
+    np.testing.assert_allclose(np.load(_package_output(output_dir) / "dumped" / "x.npy"), np.ones((2, 2), dtype=np.float32))
+    assert not (_package_output(output_dir) / "dumped" / "y.npy").exists()
 
 
 def test_run_host_dump_all_saves_inputs_intermediates_and_outputs(tmp_path):
@@ -533,14 +588,14 @@ def test_run_host_dump_all_saves_inputs_intermediates_and_outputs(tmp_path):
     np.save(sample, np.ones((2, 2), dtype=np.float32))
 
     assert run_cli.run_host(
-        pipeline,
+        _package_pipeline(tmp_path, pipeline),
         inputs=[f"x={sample}"],
         output_dir=output_dir,
         dumps=["all"],
     ) == 0
 
-    np.testing.assert_allclose(np.load(output_dir / "all_tensors" / "x.npy"), np.ones((2, 2), dtype=np.float32))
-    np.testing.assert_allclose(np.load(output_dir / "all_tensors" / "y.npy"), np.ones((2, 2), dtype=np.float32) * 2.0)
+    np.testing.assert_allclose(np.load(_package_output(output_dir) / "all_tensors" / "x.npy"), np.ones((2, 2), dtype=np.float32))
+    np.testing.assert_allclose(np.load(_package_output(output_dir) / "all_tensors" / "y.npy"), np.ones((2, 2), dtype=np.float32) * 2.0)
 
 
 def test_run_host_errors_for_missing_dump_tensor(tmp_path):
@@ -550,13 +605,16 @@ def test_run_host_errors_for_missing_dump_tensor(tmp_path):
     np.save(sample, np.ones((2, 2), dtype=np.float32))
 
     with pytest.raises(run_cli.RunCliError, match="Requested dump tensor not found"):
-        run_cli.run_host(pipeline, inputs=[f"x={sample}"], dumps=["missing"])
+        run_cli.run_host(_package_pipeline(tmp_path, pipeline), inputs=[f"x={sample}"], dumps=["missing"])
 
 
 def test_run_host_writes_display_summary_for_pose_and_gltf(capsys, tmp_path):
     pipeline = tmp_path / "display.json"
     sample = tmp_path / "pose.npy"
     output_dir = tmp_path / "outputs"
+    asset = tmp_path / "gltf" / "frame.gltf"
+    asset.parent.mkdir()
+    asset.write_text("{}", encoding="utf-8")
     _write_json(
         pipeline,
         {
@@ -596,10 +654,10 @@ def test_run_host_writes_display_summary_for_pose_and_gltf(capsys, tmp_path):
     pose[:3, 3] = [1.0, 2.0, 3.0]
     np.save(sample, pose)
 
-    assert run_cli.run_host(pipeline, inputs=[f"pose_in={sample}"], output_dir=output_dir) == 0
+    assert run_cli.run_host(_package_pipeline(tmp_path, pipeline), inputs=[f"pose_in={sample}"], output_dir=output_dir) == 0
 
     captured = capsys.readouterr()
-    summary = json.loads((output_dir / "display_summary.json").read_text(encoding="utf-8"))
+    summary = json.loads((_package_output(output_dir) / "display_summary.json").read_text(encoding="utf-8"))
     assert "Outputs: 2" in captured.out
     assert "Tensor outputs: 1" in captured.out
     assert "Host note: spatial display outputs are not rendered on host." in captured.out
@@ -610,7 +668,7 @@ def test_run_host_writes_display_summary_for_pose_and_gltf(capsys, tmp_path):
     assert summary["outputs"][0]["translation"] == [1.0, 2.0, 3.0]
     assert summary["outputs"][1]["name"] == "frame_gltf"
     assert summary["outputs"][1]["asset"] == "gltf/frame.gltf"
-    np.testing.assert_allclose(np.load(output_dir / "frame_pose.npy"), pose)
+    np.testing.assert_allclose(np.load(_package_output(output_dir) / "frame_pose.npy"), pose)
 
 
 def test_run_host_decodes_post_det_output(capsys, tmp_path):
@@ -677,20 +735,20 @@ def test_run_host_decodes_post_det_output(capsys, tmp_path):
     np.save(sample, values)
 
     assert run_cli.run_host(
-        pipeline,
+        _package_pipeline(tmp_path, pipeline),
         inputs=[f"post_det_input={sample}"],
         output_dir=output_dir,
     ) == 0
 
     captured = capsys.readouterr()
-    decoded = json.loads((output_dir / "post_det.json").read_text(encoding="utf-8"))
+    decoded = json.loads((_package_output(output_dir) / "post_det.json").read_text(encoding="utf-8"))
     assert "post_det decoded:" in captured.out
     assert "x1: 10" in captured.out
     assert "score: 0.9" in captured.out
     assert decoded["bbox"] == {"x1": 10.0, "y1": 20.0, "x2": 110.0, "y2": 220.0}
     assert decoded["score"] == pytest.approx(0.9)
     assert decoded["keypoints"][4] == {"index": 4, "x": 15.0, "y": 25.0, "score": 0.5}
-    np.testing.assert_allclose(np.load(output_dir / "post_det.npy"), values)
+    np.testing.assert_allclose(np.load(_package_output(output_dir) / "post_det.npy"), values)
 
 
 def test_run_host_package_uses_pipeline_id(capsys, tmp_path):
@@ -806,7 +864,7 @@ def test_run_host_rejects_pipeline_id_for_raw_pipeline(tmp_path):
     pipeline = tmp_path / "pipeline.json"
     _write_json(pipeline, _simple_pipeline())
 
-    with pytest.raises(run_cli.RunCliError, match="only valid when running a package"):
+    with pytest.raises(run_cli.RunCliError, match="Raw pipeline JSON is not a valid run target"):
         run_cli.run_host(pipeline, pipeline_ids=["main"])
 
 
@@ -815,13 +873,12 @@ def test_run_host_rejects_bad_input_format(tmp_path):
     _write_json(pipeline, _simple_pipeline())
 
     with pytest.raises(run_cli.RunCliError, match="Input file not found"):
-        run_cli.run_host(pipeline, inputs=["bad-input"])
+        run_cli.run_host(_package_pipeline(tmp_path, pipeline), inputs=["bad-input"])
 
 
 def test_run_device_invokes_xr_runner_script(monkeypatch, tmp_path):
     package = tmp_path / "pkg"
-    package.mkdir()
-    (package / "manifest.json").write_text('{"id":"demo","pipelines":[]}', encoding="utf-8")
+    _write_device_package_manifest(package)
     image = tmp_path / "face.jpg"
     image.write_bytes(b"jpg")
     output_dir = tmp_path / "outputs"
@@ -879,8 +936,7 @@ def test_run_device_invokes_xr_runner_script(monkeypatch, tmp_path):
 
 def test_run_device_uses_default_duration(monkeypatch, tmp_path):
     package = tmp_path / "pkg"
-    package.mkdir()
-    (package / "manifest.json").write_text('{"id":"demo","pipelines":[]}', encoding="utf-8")
+    _write_device_package_manifest(package)
     script = tmp_path / "run_xr_pipeline.py"
     script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
     calls = []
@@ -901,8 +957,7 @@ def test_run_device_uses_default_duration(monkeypatch, tmp_path):
 
 def test_run_device_json_captures_runner_output(monkeypatch, capsys, tmp_path):
     package = tmp_path / "pkg"
-    package.mkdir()
-    (package / "manifest.json").write_text('{"id":"demo","pipelines":[]}', encoding="utf-8")
+    _write_device_package_manifest(package)
     script = tmp_path / "run_xr_pipeline.py"
     script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
     monkeypatch.setattr(run_cli, "_xr_runner_script", lambda: script)
@@ -1209,8 +1264,7 @@ def test_run_device_rejects_missing_target(tmp_path):
 
 def test_run_device_validates_inputs_before_subprocess(monkeypatch, tmp_path):
     package = tmp_path / "pkg"
-    package.mkdir()
-    (package / "manifest.json").write_text('{"id":"demo","pipelines":[]}', encoding="utf-8")
+    _write_device_package_manifest(package)
     apk = tmp_path / "missing.apk"
     calls = []
     monkeypatch.setattr(run_cli.subprocess, "run", lambda cmd, **_kwargs: calls.append(cmd))

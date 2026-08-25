@@ -36,6 +36,15 @@ def _pipeline_with_model(model_path="face.tflite"):
     }
 
 
+def _pipeline_with_operator(op_type):
+    return {
+        "tensors": {},
+        "operators": [{"type": op_type, "inputs": [], "outputs": []}],
+        "inputs": [],
+        "outputs": [],
+    }
+
+
 def test_create_package_normalizes_pipeline_and_model_paths(tmp_path):
     source_dir = tmp_path / "src"
     pipeline = source_dir / "detection.json"
@@ -117,6 +126,48 @@ def test_create_package_normalizes_gltf_tensor_assets(tmp_path):
     assert packaged_pipeline["tensors"]["scene"]["asset"] == "gltf/frame.gltf"
 
 
+def test_create_package_infers_common_operator_modes_when_supported_modes_omitted(tmp_path):
+    pipeline = tmp_path / "pipeline.json"
+    _write_json(pipeline, _pipeline_with_operator("assignment"))
+
+    output = tmp_path / "pkg"
+    package_cli.create_package(
+        package_id="demo",
+        pipelines=[f"main={pipeline}"],
+        output=output,
+    )
+
+    assert _read_json(output / "manifest.json")["runtime"]["supported_modes"] == ["xr", "spatial"]
+
+
+def test_create_package_infers_xr_mode_from_xr_only_operator(tmp_path):
+    pipeline = tmp_path / "display.json"
+    _write_json(pipeline, _pipeline_with_operator("render_text"))
+
+    output = tmp_path / "pkg"
+    package_cli.create_package(
+        package_id="demo",
+        pipelines=[f"display={pipeline}"],
+        output=output,
+    )
+
+    assert _read_json(output / "manifest.json")["runtime"]["supported_modes"] == ["xr"]
+
+
+def test_create_package_infers_spatial_mode_from_spatial_only_operator(tmp_path):
+    pipeline = tmp_path / "scene.json"
+    _write_json(pipeline, _pipeline_with_operator("update_component"))
+
+    output = tmp_path / "pkg"
+    package_cli.create_package(
+        package_id="demo",
+        pipelines=[f"scene={pipeline}"],
+        output=output,
+    )
+
+    assert _read_json(output / "manifest.json")["runtime"]["supported_modes"] == ["spatial"]
+
+
 def test_create_package_errors_for_missing_asset(tmp_path):
     pipeline = tmp_path / "pipeline.json"
     _write_json(pipeline, _pipeline_with_model("missing.tflite"))
@@ -170,6 +221,109 @@ def test_create_package_zip_output_and_validate(tmp_path):
     assert package_cli.validate_package(archive) == 0
 
 
+def test_create_package_repacks_existing_package_root_without_pipeline_arg(tmp_path):
+    source_pipeline = tmp_path / "src" / "pipeline.json"
+    model = tmp_path / "src" / "face.tflite"
+    _write_json(source_pipeline, _pipeline_with_model("face.tflite"))
+    model.write_bytes(b"model")
+    source = tmp_path / "source-package"
+    package_cli.create_package(
+        package_id="face-demo",
+        pipelines=[f"main={source_pipeline}"],
+        output=source,
+    )
+
+    archive = tmp_path / "repacked.zip"
+    package_cli.create_package(
+        package_id="",
+        pipelines=[],
+        source=source,
+        output=archive,
+        zip_output=True,
+    )
+
+    assert archive.is_file()
+    assert package_cli.validate_package(archive) == 0
+    with zipfile.ZipFile(archive) as package_zip:
+        names = set(package_zip.namelist())
+    assert "manifest.json" in names
+    assert "pipeline/main.json" in names
+    assert "model/face.tflite" in names
+
+
+def test_create_package_uses_source_without_manifest_as_asset_root(tmp_path):
+    source = tmp_path / "source"
+    pipeline = source / "pipeline.json"
+    model = source / "model" / "face.tflite"
+    _write_json(pipeline, _pipeline_with_model("model/face.tflite"))
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"model")
+
+    package_cli.create_package(
+        package_id="face-demo",
+        pipelines=[f"main={pipeline}"],
+        source=source,
+        output=tmp_path / "out.zip",
+        zip_output=True,
+    )
+
+    assert package_cli.validate_package(tmp_path / "out.zip") == 0
+
+
+def test_create_package_reconciles_existing_manifest_modes_with_force(tmp_path):
+    source = tmp_path / "source-package"
+    _write_json(
+        source / "manifest.json",
+        {
+            "schema_version": "2",
+            "id": "demo",
+            "pipelines": [{"id": "display", "path": "pipeline/display.json"}],
+            "runtime": {"supported_modes": ["spatial"]},
+        },
+    )
+    _write_json(source / "pipeline" / "display.json", _pipeline_with_operator("render_text"))
+    original_manifest = _read_json(source / "manifest.json")
+
+    with pytest.raises(package_cli.PackageCliError, match="includes spatial.*XR-only"):
+        package_cli.create_package(package_id="", pipelines=[], source=source, output=tmp_path / "bad.zip")
+
+    archive = tmp_path / "fixed.zip"
+    package_cli.create_package(package_id="", pipelines=[], source=source, output=archive, force=True)
+
+    with zipfile.ZipFile(archive) as package_zip:
+        manifest = json.loads(package_zip.read("manifest.json"))
+    assert manifest["runtime"]["supported_modes"] == ["xr"]
+    assert _read_json(source / "manifest.json") == original_manifest
+    assert package_cli.validate_package(archive) == 0
+
+
+def test_create_package_force_reconcile_failure_leaves_existing_output_unchanged(tmp_path):
+    source = tmp_path / "source-package"
+    _write_json(
+        source / "manifest.json",
+        {
+            "schema_version": "2",
+            "id": "demo",
+            "pipelines": [
+                {"id": "display", "path": "pipeline/display.json"},
+                {"id": "scene", "path": "pipeline/scene.json"},
+            ],
+            "runtime": {"supported_modes": ["xr", "spatial"]},
+        },
+    )
+    _write_json(source / "pipeline" / "display.json", _pipeline_with_operator("render_text"))
+    _write_json(source / "pipeline" / "scene.json", _pipeline_with_operator("update_component"))
+    output = tmp_path / "existing-output"
+    sentinel = output / "sentinel.txt"
+    sentinel.parent.mkdir()
+    sentinel.write_text("keep", encoding="utf-8")
+
+    with pytest.raises(package_cli.PackageCliError, match="mix XR-only and Spatial-only"):
+        package_cli.create_package(package_id="", pipelines=[], source=source, output=output, force=True)
+
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
 def test_validate_package_rejects_zip_path_traversal(tmp_path):
     archive = tmp_path / "bad.zip"
     with zipfile.ZipFile(archive, "w") as package_zip:
@@ -200,6 +354,227 @@ def test_validate_package_accepts_windows_relative_zip_paths(tmp_path):
         )
 
     assert package_cli.validate_package(archive) == 0
+
+
+def test_validate_package_rejects_absolute_manifest_pipeline_path(tmp_path):
+    external_pipeline = tmp_path / "external.json"
+    _write_json(external_pipeline, {"tensors": {}, "operators": [], "inputs": [], "outputs": []})
+    package = tmp_path / "pkg"
+    _write_json(
+        package / "manifest.json",
+        {
+            "schema_version": "2",
+            "id": "bad",
+            "pipelines": [{"id": "main", "path": str(external_pipeline)}],
+        },
+    )
+
+    with pytest.raises(package_cli.PackageCliError, match="pipeline path must be package-relative"):
+        package_cli.validate_package(package)
+
+
+def test_validate_package_rejects_manifest_pipeline_path_traversal(tmp_path):
+    external_pipeline = tmp_path / "external.json"
+    _write_json(external_pipeline, {"tensors": {}, "operators": [], "inputs": [], "outputs": []})
+    package = tmp_path / "pkg"
+    _write_json(
+        package / "manifest.json",
+        {
+            "schema_version": "2",
+            "id": "bad",
+            "pipelines": [{"id": "main", "path": "../external.json"}],
+        },
+    )
+
+    with pytest.raises(package_cli.PackageCliError, match="Invalid package-relative path"):
+        package_cli.validate_package(package)
+
+
+def test_validate_package_rejects_absolute_model_asset_path(tmp_path):
+    package = tmp_path / "pkg"
+    external_model = tmp_path / "external.tflite"
+    external_model.write_bytes(b"model")
+    _write_json(
+        package / "manifest.json",
+        {
+            "schema_version": "2",
+            "id": "bad",
+            "pipelines": [{"id": "main", "path": "pipeline/main.json"}],
+        },
+    )
+    _write_json(package / "pipeline" / "main.json", _pipeline_with_model(str(external_model)))
+
+    with pytest.raises(package_cli.PackageCliError, match="Invalid package-relative path"):
+        package_cli.validate_package(package)
+
+
+def test_validate_package_rejects_asset_symlink_escape(tmp_path):
+    package = tmp_path / "pkg"
+    external_model = tmp_path / "external.tflite"
+    external_model.write_bytes(b"model")
+    package_model = package / "model" / "external.tflite"
+    package_model.parent.mkdir(parents=True)
+    package_model.symlink_to(external_model)
+    _write_json(
+        package / "manifest.json",
+        {
+            "schema_version": "2",
+            "id": "bad",
+            "pipelines": [{"id": "main", "path": "pipeline/main.json"}],
+        },
+    )
+    _write_json(package / "pipeline" / "main.json", _pipeline_with_model("model/external.tflite"))
+
+    with pytest.raises(package_cli.PackageCliError, match="asset path escapes package root"):
+        package_cli.validate_package(package)
+
+
+def test_validate_package_rejects_xr_only_operator_for_spatial_manifest(tmp_path):
+    package = tmp_path / "pkg"
+    _write_json(
+        package / "manifest.json",
+        {
+            "schema_version": "2",
+            "id": "demo",
+            "pipelines": [{"id": "display", "path": "pipeline/display.json"}],
+            "runtime": {"supported_modes": ["spatial"]},
+        },
+    )
+    _write_json(
+        package / "pipeline" / "display.json",
+        _pipeline_with_operator("XR_SECURE_MR_OPERATOR_TYPE_RENDER_TEXT_PICO"),
+    )
+
+    with pytest.raises(package_cli.PackageCliError, match="includes spatial.*XR-only"):
+        package_cli.validate_package(package)
+
+
+def test_validate_package_rejects_spatial_only_operator_for_xr_manifest(tmp_path):
+    package = tmp_path / "pkg"
+    _write_json(
+        package / "manifest.json",
+        {
+            "schema_version": "2",
+            "id": "demo",
+            "pipelines": [{"id": "scene", "path": "pipeline/scene.json"}],
+            "runtime": {"supported_modes": ["xr"]},
+        },
+    )
+    _write_json(
+        package / "pipeline" / "scene.json",
+        _pipeline_with_operator("XR_SECURE_MR_OPERATOR_TYPE_UPDATE_COMPONENT_PICO"),
+    )
+
+    with pytest.raises(package_cli.PackageCliError, match="includes xr.*Spatial-only"):
+        package_cli.validate_package(package)
+
+
+def test_validate_package_rejects_mixed_xr_and_spatial_only_operators(tmp_path):
+    package = tmp_path / "pkg"
+    _write_json(
+        package / "manifest.json",
+        {
+            "schema_version": "2",
+            "id": "demo",
+            "pipelines": [{"id": "mixed", "path": "pipeline/mixed.json"}],
+            "runtime": {"supported_modes": ["xr", "spatial"]},
+        },
+    )
+    _write_json(
+        package / "pipeline" / "mixed.json",
+        {
+            "tensors": {},
+            "operators": [
+                {"type": "XR_SECURE_MR_OPERATOR_TYPE_RENDER_TEXT_PICO", "inputs": [], "outputs": []},
+                {"type": "XR_SECURE_MR_OPERATOR_TYPE_SCENEGRAPH_VISIBILITY_PICO", "inputs": [], "outputs": []},
+            ],
+            "inputs": [],
+            "outputs": [],
+        },
+    )
+
+    with pytest.raises(package_cli.PackageCliError, match="mix XR-only and Spatial-only"):
+        package_cli.validate_package(package)
+
+
+def test_validate_package_rejects_xr_only_operator_when_manifest_claims_both_modes(tmp_path):
+    package = tmp_path / "pkg"
+    _write_json(
+        package / "manifest.json",
+        {
+            "schema_version": "2",
+            "id": "demo",
+            "pipelines": [{"id": "display", "path": "pipeline/display.json"}],
+            "runtime": {"supported_modes": ["xr", "spatial"]},
+        },
+    )
+    _write_json(
+        package / "pipeline" / "display.json",
+        _pipeline_with_operator("XR_SECURE_MR_OPERATOR_TYPE_RENDER_TEXT_PICO"),
+    )
+
+    with pytest.raises(package_cli.PackageCliError, match="includes spatial.*XR-only"):
+        package_cli.validate_package(package)
+
+
+def test_validate_package_rejects_spatial_only_operator_when_manifest_claims_both_modes(tmp_path):
+    package = tmp_path / "pkg"
+    _write_json(
+        package / "manifest.json",
+        {
+            "schema_version": "2",
+            "id": "demo",
+            "pipelines": [{"id": "scene", "path": "pipeline/scene.json"}],
+            "runtime": {"supported_modes": ["xr", "spatial"]},
+        },
+    )
+    _write_json(
+        package / "pipeline" / "scene.json",
+        _pipeline_with_operator("XR_SECURE_MR_OPERATOR_TYPE_UPDATE_COMPONENT_PICO"),
+    )
+
+    with pytest.raises(package_cli.PackageCliError, match="includes xr.*Spatial-only"):
+        package_cli.validate_package(package)
+
+
+def test_create_package_rejects_manifest_modes_for_mode_specific_operators(tmp_path):
+    pipeline = tmp_path / "display.json"
+    _write_json(pipeline, _pipeline_with_operator("render_text"))
+
+    with pytest.raises(package_cli.PackageCliError, match="includes spatial.*XR-only"):
+        package_cli.create_package(
+            package_id="bad",
+            pipelines=[f"display={pipeline}"],
+            output=tmp_path / "pkg",
+            supported_modes=["spatial"],
+        )
+
+
+def test_create_package_rejects_mixed_exclusive_operators_across_pipelines(tmp_path):
+    display = tmp_path / "display.json"
+    scene = tmp_path / "scene.json"
+    _write_json(display, _pipeline_with_operator("render_text"))
+    _write_json(scene, _pipeline_with_operator("update_component"))
+
+    with pytest.raises(package_cli.PackageCliError, match="mix XR-only and Spatial-only"):
+        package_cli.create_package(
+            package_id="bad",
+            pipelines=[f"display={display}", f"scene={scene}"],
+            output=tmp_path / "pkg",
+        )
+
+
+def test_create_package_rejects_explicit_spatial_mode_with_xr_only_operator(tmp_path):
+    pipeline = tmp_path / "display.json"
+    _write_json(pipeline, _pipeline_with_operator("render_text"))
+
+    with pytest.raises(package_cli.PackageCliError, match="includes spatial.*XR-only"):
+        package_cli.create_package(
+            package_id="bad",
+            pipelines=[f"display={pipeline}"],
+            output=tmp_path / "pkg",
+            supported_modes=["spatial"],
+        )
 
 
 def test_create_package_existing_output_requires_confirmation(tmp_path, monkeypatch):

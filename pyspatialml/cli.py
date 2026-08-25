@@ -18,21 +18,17 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib
 import io
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Optional, Sequence
 
 from pyspatialml import __version__
-from pyspatialml import compare_cli
-from pyspatialml import model_cli
-from pyspatialml import operator_cli
-from pyspatialml import package_cli
-from pyspatialml import pipeline_cli
-from pyspatialml import run_cli
 from pyspatialml.litert_tools import (
     DEFAULT_LITERT_PACKAGE,
     DEFAULT_LITERT_VERSION,
@@ -41,8 +37,28 @@ from pyspatialml.litert_tools import (
     install_litert_cli,
     managed_litert_bin,
     print_litert_error,
+    repair_litert_cli,
     resolve_litert_cli,
 )
+
+
+class CliError(RuntimeError):
+    """Raised for lightweight CLI validation failures before domain dispatch."""
+
+
+class RunTargetCliError(RuntimeError):
+    """Raised for lightweight run target validation failures before run dispatch."""
+
+
+_DOMAIN_MODULES = {
+    "compare_cli": "pyspatialml.compare_cli",
+    "model_cli": "pyspatialml.model_cli",
+    "onnx_tools": "pyspatialml.onnx_tools",
+    "operator_cli": "pyspatialml.operator_cli",
+    "package_cli": "pyspatialml.package_cli",
+    "pipeline_cli": "pyspatialml.pipeline_cli",
+    "run_cli": "pyspatialml.run_cli",
+}
 
 
 _LITERT_MODEL_COMMANDS = {
@@ -52,6 +68,25 @@ _LITERT_MODEL_COMMANDS = {
     "benchmark": "benchmark",
     "visualize": "visualize",
 }
+
+_DOMAIN_ERRORS = {
+    "CompareCliError": ("PSM_COMPARE", "compare", "Error [PSM_COMPARE]"),
+    "ModelCliError": ("PSM_MODEL", "model", "Error [PSM_MODEL]"),
+    "OnnxToolError": ("PSM_ONNX_CONVERT", "model", "Error [PSM_ONNX_CONVERT]"),
+    "OperatorCliError": ("PSM_OPERATOR", "operator", "Error [PSM_OPERATOR]"),
+    "PackageCliError": ("PSM_PACKAGE", "package", "Error [PSM_PACKAGE]"),
+    "PipelineCliError": ("PSM_PIPELINE", "pipeline", "Error [PSM_PIPELINE]"),
+    "RunCliError": ("PSM_RUN", "run", "Error [PSM_RUN]"),
+    "CliError": ("PSM_PIPELINE", "pipeline", "Error [PSM_PIPELINE]"),
+    "RunTargetCliError": ("PSM_RUN", "run", "Error [PSM_RUN]"),
+}
+
+_PACKAGE_TARGET_HINT = (
+    "Run targets must be a SpatialML pipeline package directory containing "
+    "manifest.json, or a .zip package containing manifest.json. The manifest "
+    "must include a non-empty pipelines list with paths to pipeline JSON files. "
+    "Use `pyspatialml package create` to create a package from pipeline JSON."
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -81,7 +116,7 @@ def _add_tools_parser(subparsers: argparse._SubParsersAction) -> None:
     litert = tools_subparsers.add_parser("litert", help="Resolve or install LiteRT CLI.")
     litert.add_argument(
         "action",
-        choices=["status", "install"],
+        choices=["status", "install", "repair"],
         nargs="?",
         default="status",
         help="Tool action to run.",
@@ -89,6 +124,11 @@ def _add_tools_parser(subparsers: argparse._SubParsersAction) -> None:
     litert.add_argument("--tool-cache", type=Path, help="Managed tool cache directory.")
     litert.add_argument("--package", default=DEFAULT_LITERT_PACKAGE, help="Pip package to install.")
     litert.add_argument("--version", default=DEFAULT_LITERT_VERSION, help="LiteRT package version.")
+    litert.add_argument(
+        "--force",
+        action="store_true",
+        help="Recreate the managed LiteRT environment before installing.",
+    )
     _add_json_output_argument(litert)
     litert.set_defaults(func=_run_litert_tool)
 
@@ -177,6 +217,13 @@ def _add_pipeline_parser(subparsers: argparse._SubParsersAction) -> None:
     _add_json_output_argument(add_tensor)
     add_tensor.set_defaults(func=_run_pipeline_add_tensor)
 
+    remove_tensor = pipeline_subparsers.add_parser("remove-tensor", help="Remove a tensor descriptor.")
+    remove_tensor.add_argument("pipeline", type=Path, help="Pipeline JSON path.")
+    remove_tensor.add_argument("name", help="Tensor name.")
+    remove_tensor.add_argument("--force", action="store_true", help="Remove even when operators reference the tensor.")
+    _add_json_output_argument(remove_tensor)
+    remove_tensor.set_defaults(func=_run_pipeline_remove_tensor)
+
     add_op = pipeline_subparsers.add_parser("add-op", help="Append an operator.")
     add_op.add_argument("pipeline", type=Path, help="Pipeline JSON path.")
     add_op.add_argument("op_type", help="Operator type or alias, for example assignment or arithmetic.")
@@ -193,6 +240,12 @@ def _add_pipeline_parser(subparsers: argparse._SubParsersAction) -> None:
     add_op.add_argument("--cpu-target-num-threads", type=int, default=1, help="CPU thread count for CPU target.")
     _add_json_output_argument(add_op)
     add_op.set_defaults(func=_run_pipeline_add_op)
+
+    remove_op = pipeline_subparsers.add_parser("remove-op", help="Remove an operator by index.")
+    remove_op.add_argument("pipeline", type=Path, help="Pipeline JSON path.")
+    remove_op.add_argument("--index", type=int, required=True, help="Operator index from pipeline inspect.")
+    _add_json_output_argument(remove_op)
+    remove_op.set_defaults(func=_run_pipeline_remove_op)
 
     set_input = pipeline_subparsers.add_parser("set-input", help="Set top-level pipeline inputs.")
     set_input.add_argument("pipeline", type=Path, help="Pipeline JSON path.")
@@ -230,7 +283,8 @@ def _add_package_parser(subparsers: argparse._SubParsersAction) -> None:
     package_subparsers = package.add_subparsers(dest="package_command", required=True)
 
     package_create = package_subparsers.add_parser("create", help="Create a package directory or zip.")
-    package_create.add_argument("--id", required=True, dest="package_id", help="Package id.")
+    package_create.add_argument("source", type=Path, nargs="?", help="Source package root/zip, or asset root for loose pipelines.")
+    package_create.add_argument("--id", dest="package_id", help="Package id.")
     package_create.add_argument("--pipeline", action="append", default=[], help="Pipeline in id=path format. Repeatable.")
     package_create.add_argument("--output", type=Path, required=True, help="Output package directory or .zip path.")
     package_create.add_argument("--supported-mode", action="append", default=[], help="Supported mode: xr or spatial. Repeatable.")
@@ -314,48 +368,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.json = True
     try:
         return args.func(args)
-    except compare_cli.CompareCliError as exc:
-        if _json_requested(args):
-            _print_error_json("PSM_COMPARE", "compare", str(exc), exit_code=1)
-            return 1
-        compare_cli.print_compare_error(exc)
-        return 1
     except LiteRTToolError as exc:
         if _json_requested(args):
             _print_error_json("PSM_LITERT_UNAVAILABLE", "litert_tool", str(exc), exit_code=2)
             return 2
         print_litert_error(exc)
         return 2
-    except model_cli.ModelCliError as exc:
-        if _json_requested(args):
-            _print_error_json("PSM_MODEL", "model", str(exc), exit_code=1)
-            return 1
-        model_cli.print_model_error(exc)
-        return 1
-    except operator_cli.OperatorCliError as exc:
-        if _json_requested(args):
-            _print_error_json("PSM_OPERATOR", "operator", str(exc), exit_code=1)
-            return 1
-        operator_cli.print_operator_error(exc)
-        return 1
-    except package_cli.PackageCliError as exc:
-        if _json_requested(args):
-            _print_error_json("PSM_PACKAGE", "package", str(exc), exit_code=1)
-            return 1
-        package_cli.print_package_error(exc)
-        return 1
-    except pipeline_cli.PipelineCliError as exc:
-        if _json_requested(args):
-            _print_error_json("PSM_PIPELINE", "pipeline", str(exc), exit_code=1)
-            return 1
-        pipeline_cli.print_pipeline_error(exc)
-        return 1
-    except run_cli.RunCliError as exc:
-        if _json_requested(args):
-            _print_error_json("PSM_RUN", "run", str(exc), exit_code=1)
-            return 1
-        run_cli.print_run_error(exc)
-        return 1
     except subprocess.CalledProcessError as exc:
         if _json_requested(args):
             _print_error_json(
@@ -372,28 +390,40 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if exc.stderr:
             print(exc.stderr, end="", file=sys.stderr)
         return exc.returncode or 3
+    except Exception as exc:
+        handled = _handle_domain_error(args, exc)
+        if handled is not None:
+            return handled
+        raise
 
 
 def _run_litert_tool(args: argparse.Namespace) -> int:
-    if args.action == "install":
-        cli = install_litert_cli(
-            cache_dir=args.tool_cache,
-            package=args.package,
-            version=args.version,
-        )
+    if args.action in {"install", "repair"}:
+        force = bool(args.force or args.action == "repair")
+        install = repair_litert_cli if args.action == "repair" else install_litert_cli
+        kwargs = {
+            "cache_dir": args.tool_cache,
+            "package": args.package,
+            "version": args.version,
+        }
+        if args.action == "install":
+            kwargs["force"] = force
+        cli = install(**kwargs)
         if args.json:
             _print_json(
                 {
                     "ok": True,
-                    "command": "tools litert install",
+                    "command": f"tools litert {args.action}",
                     "path": str(cli.path),
                     "managed": cli.managed,
                     "package": args.package,
                     "version": args.version,
+                    "recreated": force,
                 }
             )
             return 0
-        print(f"LiteRT CLI installed: {cli.path}")
+        action = "repaired" if args.action == "repair" else "installed"
+        print(f"LiteRT CLI {action}: {cli.path}")
         return 0
 
     cli = resolve_litert_cli(cache_dir=args.tool_cache)
@@ -422,6 +452,7 @@ def _run_litert_tool(args: argparse.Namespace) -> int:
 
 
 def _run_compare(args: argparse.Namespace) -> int:
+    compare_cli = _domain_module("compare_cli")
     return compare_cli.compare_paths(
         args.expected,
         args.actual,
@@ -432,6 +463,7 @@ def _run_compare(args: argparse.Namespace) -> int:
 
 
 def _run_model_info(args: argparse.Namespace) -> int:
+    model_cli = _domain_module("model_cli")
     return model_cli.model_info(
         args.model,
         signature_index=args.signature_index,
@@ -440,16 +472,25 @@ def _run_model_info(args: argparse.Namespace) -> int:
 
 
 def _run_operator_list(args: argparse.Namespace) -> int:
+    operator_cli = _domain_module("operator_cli")
     return operator_cli.list_operators(as_json=args.json)
 
 
 def _run_operator_describe(args: argparse.Namespace) -> int:
+    operator_cli = _domain_module("operator_cli")
     return operator_cli.describe_operator(args.name, as_json=args.json)
 
 
 def _run_litert_model_command(args: argparse.Namespace) -> int:
-    cli = resolve_litert_cli(ensure=True, cache_dir=args.tool_cache)
     litert_args = _strip_remainder_separator(args.litert_args)
+    if args.litert_command == "convert" and _help_requested(litert_args):
+        return _run_model_convert_help(args, litert_args)
+    if args.litert_command == "convert":
+        _validate_model_convert_input(litert_args)
+        onnx_model = _onnx_convert_input(litert_args)
+        if onnx_model is not None:
+            return _run_onnx_model_convert(args, onnx_model, litert_args)
+    cli = resolve_litert_cli(ensure=True, cache_dir=args.tool_cache)
     env = dict(os.environ)
     env.setdefault("UV_SYSTEM_CERTS", "true")
     argv = [str(cli.path), args.litert_command, *litert_args]
@@ -471,6 +512,294 @@ def _run_litert_model_command(args: argparse.Namespace) -> int:
     return result.returncode
 
 
+def _run_model_convert_help(args: argparse.Namespace, litert_args: Sequence[str]) -> int:
+    cli = resolve_litert_cli(ensure=True, cache_dir=args.tool_cache)
+    env = dict(os.environ)
+    env.setdefault("UV_SYSTEM_CERTS", "true")
+    argv = [str(cli.path), "convert", *litert_args]
+    result = subprocess.run(argv, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    help_text = _model_convert_help_text(result.stdout or result.stderr)
+    if _json_requested(args):
+        _print_json(
+            {
+                "ok": result.returncode == 0,
+                "command": "model convert",
+                "litert": str(cli.path),
+                "argv": argv,
+                "returncode": result.returncode,
+                "stdout": help_text,
+                "stderr": "" if result.stdout else result.stderr,
+            }
+        )
+        return result.returncode
+    print(help_text, end="" if help_text.endswith("\n") else "\n")
+    return result.returncode
+
+
+def _model_convert_help_text(litert_help: str) -> str:
+    prefix = """pySpatialML model convert
+
+ONNX input:
+  .onnx files are converted with pySpatialML's managed onnx2tf environment.
+
+  Example:
+    pyspatialml model convert -- model.onnx --output ./converted_tflite
+
+  ONNX aliases:
+    --input-shape NAME:DIMS          -> onnx2tf --overwrite_input_shape
+    --shape-hint NAME:DIMS           -> onnx2tf --shape_hints
+    --no-large-tensor                -> onnx2tf --no_large_tensor
+    --keep-nchw NAME                 -> onnx2tf --keep_ncw_or_nchw_or_ncdhw_input_names
+    --keep-nhwc NAME                 -> onnx2tf --keep_nwc_or_nhwc_or_ndhwc_input_names
+    --non-verbose                    -> onnx2tf --non_verbose
+    --copy-input-output-names        -> onnx2tf --copy_onnx_input_output_names_to_tflite
+    --dynamic-range-quantize         -> onnx2tf --output_dynamic_range_quantized_tflite
+    --integer-quantize               -> onnx2tf --output_integer_quantized_tflite
+    --onnx2tf-arg VALUE              -> append raw onnx2tf argument
+
+  Other ONNX-specific flags after the model path are passed to onnx2tf, except
+  --output, which pySpatialML maps to onnx2tf's output directory.
+
+Other supported inputs:
+  Non-ONNX inputs are delegated to LiteRT convert.
+
+"""
+    if not litert_help:
+        return prefix
+    return prefix + "LiteRT convert help:\n" + litert_help
+
+
+def _help_requested(args: Sequence[str]) -> bool:
+    return any(value in {"-h", "--help"} for value in args)
+
+
+def _run_onnx_model_convert(args: argparse.Namespace, model: Path, litert_args: Sequence[str]) -> int:
+    onnx_tools = _domain_module("onnx_tools")
+    output = _convert_output_dir(litert_args)
+    _validate_onnx_shape_aliases(litert_args)
+    extra_args = _onnx_extra_args(litert_args)
+    result = onnx_tools.convert_onnx_to_tflite(
+        model=model,
+        output=output,
+        extra_args=extra_args,
+        cache_dir=args.tool_cache,
+        verbose=not _json_requested(args),
+    )
+    if _json_requested(args):
+        _print_json(
+            {
+                "ok": True,
+                "command": "model convert",
+                "converter": "onnx2tf",
+                "model": str(result.model),
+                "output": str(result.output),
+                "tflite_models": [str(path) for path in result.tflite_models],
+                "tool": str(result.tool.path),
+                "managed": result.tool.managed,
+                "argv": result.argv,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            }
+        )
+        return 0
+    print(f"Converted ONNX model: {result.model}")
+    print(f"Output directory: {result.output}")
+    for path in result.tflite_models:
+        print(f"TFLite model: {path}")
+    if result.stderr:
+        print(result.stderr, end="" if result.stderr.endswith("\n") else "\n", file=sys.stderr)
+    return 0
+
+
+def _onnx_convert_input(litert_args: Sequence[str]) -> Optional[Path]:
+    for value in litert_args:
+        if value.startswith("-"):
+            continue
+        if Path(value).suffix.lower() == ".onnx":
+            return Path(value)
+    return None
+
+
+def _validate_model_convert_input(litert_args: Sequence[str]) -> None:
+    model_value = _model_convert_input(litert_args)
+    if model_value is None:
+        return
+    model = Path(model_value)
+    if _looks_like_local_model_path(model_value) and not model.exists():
+        onnx_tools = _domain_module("onnx_tools")
+        raise onnx_tools.OnnxToolError(
+            f"Model input file not found: {model}. "
+            "Pass an existing model file, such as .onnx, .tflite, .pth, or a conversion script. "
+            "If this is a model name rather than a file path, use the format expected by the LiteRT CLI."
+        )
+
+
+def _model_convert_input(litert_args: Sequence[str]) -> Optional[str]:
+    options_with_values = {
+        "--output",
+        "--input-shape",
+        "--shape-hint",
+        "--keep-nchw",
+        "--keep-nhwc",
+        "--onnx2tf-arg",
+        "--model-func",
+        "--input-func",
+        "--target",
+        "--export-aipack",
+        "--quantize-recipe",
+        "--quantize",
+        "--model-args",
+        "--prefill-lengths",
+        "--cache-length",
+        "--script",
+    }
+    index = 0
+    while index < len(litert_args):
+        value = litert_args[index]
+        if value == "--":
+            index += 1
+            continue
+        if value in options_with_values:
+            index += 2
+            continue
+        if any(value.startswith(option + "=") for option in options_with_values):
+            index += 1
+            continue
+        if value.startswith("-"):
+            index += 1
+            continue
+        return value
+    return None
+
+
+def _looks_like_local_model_path(value: str) -> bool:
+    path = Path(value)
+    if path.is_absolute() or value.startswith(("./", "../", "~/")):
+        return True
+    return path.suffix.lower() in {
+        ".onn",
+        ".onnx",
+        ".tflite",
+        ".lite",
+        ".pt",
+        ".pth",
+        ".ckpt",
+        ".py",
+    }
+
+
+def _convert_output_dir(litert_args: Sequence[str]) -> Path:
+    onnx_tools = _domain_module("onnx_tools")
+    for index, value in enumerate(litert_args):
+        if value == "--output":
+            if index + 1 >= len(litert_args):
+                raise onnx_tools.OnnxToolError("--output requires a directory for ONNX conversion")
+            return Path(litert_args[index + 1])
+        if value.startswith("--output="):
+            return Path(value.split("=", 1)[1])
+    raise onnx_tools.OnnxToolError("ONNX conversion requires --output DIRECTORY")
+
+
+def _validate_onnx_shape_aliases(litert_args: Sequence[str]) -> None:
+    onnx_tools = _domain_module("onnx_tools")
+    input_shapes = set(_onnx_alias_names(litert_args, "--input-shape"))
+    shape_hints = set(_onnx_alias_names(litert_args, "--shape-hint"))
+    overlap = sorted(input_shapes & shape_hints)
+    if overlap:
+        names = ", ".join(overlap)
+        raise onnx_tools.OnnxToolError(
+            f"Do not pass both --input-shape and --shape-hint for the same ONNX input: {names}. "
+            "--input-shape fixes or overwrites the model input shape; --shape-hint is only for "
+            "dynamic input dimensions when you are not overwriting that same input."
+        )
+
+
+def _onnx_alias_names(args: Sequence[str], alias: str) -> list[str]:
+    names = []
+    index = 0
+    while index < len(args):
+        value = args[index]
+        raw = None
+        if value == alias and index + 1 < len(args):
+            raw = args[index + 1]
+            index += 2
+        elif value.startswith(alias + "="):
+            raw = value.split("=", 1)[1]
+            index += 1
+        else:
+            index += 1
+        if raw:
+            names.append(raw.split(":", 1)[0])
+    return names
+
+
+def _onnx_extra_args(litert_args: Sequence[str]) -> list[str]:
+    extra_args = []
+    index = 0
+    skipped_model = False
+    while index < len(litert_args):
+        value = litert_args[index]
+        if not skipped_model and not value.startswith("-") and Path(value).suffix.lower() == ".onnx":
+            skipped_model = True
+            index += 1
+            continue
+        if value == "--output":
+            index += 2
+            continue
+        if value.startswith("--output="):
+            index += 1
+            continue
+        consumed = _append_onnx_extra_arg_alias(litert_args, index, extra_args)
+        if consumed:
+            index += consumed
+            continue
+        extra_args.append(value)
+        index += 1
+    return extra_args
+
+
+def _append_onnx_extra_arg_alias(args: Sequence[str], index: int, extra_args: list[str]) -> int:
+    onnx_tools = _domain_module("onnx_tools")
+    value = args[index]
+    alias_flags = {
+        "--no-large-tensor": "--no_large_tensor",
+        "--non-verbose": "--non_verbose",
+        "--copy-input-output-names": "--copy_onnx_input_output_names_to_tflite",
+        "--dynamic-range-quantize": "--output_dynamic_range_quantized_tflite",
+        "--integer-quantize": "--output_integer_quantized_tflite",
+    }
+    if value in alias_flags:
+        extra_args.append(alias_flags[value])
+        return 1
+
+    value_aliases = {
+        "--input-shape": "--overwrite_input_shape",
+        "--shape-hint": "--shape_hints",
+        "--keep-nchw": "--keep_ncw_or_nchw_or_ncdhw_input_names",
+        "--keep-nhwc": "--keep_nwc_or_nhwc_or_ndhwc_input_names",
+    }
+    if value in value_aliases:
+        if index + 1 >= len(args):
+            raise onnx_tools.OnnxToolError(f"{value} requires a value")
+        extra_args.extend([value_aliases[value], args[index + 1]])
+        return 2
+    for alias, target in value_aliases.items():
+        if value.startswith(alias + "="):
+            extra_args.extend([target, value.split("=", 1)[1]])
+            return 1
+
+    if value == "--onnx2tf-arg":
+        if index + 1 >= len(args):
+            raise onnx_tools.OnnxToolError("--onnx2tf-arg requires a value")
+        extra_args.append(args[index + 1])
+        return 2
+    if value.startswith("--onnx2tf-arg="):
+        extra_args.append(value.split("=", 1)[1])
+        return 1
+
+    return 0
+
+
 def _strip_remainder_separator(args: Sequence[str]) -> list[str]:
     values = list(args)
     if values and values[0] == "--":
@@ -479,6 +808,7 @@ def _strip_remainder_separator(args: Sequence[str]) -> list[str]:
 
 
 def _run_pipeline_init(args: argparse.Namespace) -> int:
+    pipeline_cli = _domain_module("pipeline_cli")
     return _json_action(
         args,
         "pipeline.init",
@@ -488,6 +818,7 @@ def _run_pipeline_init(args: argparse.Namespace) -> int:
 
 
 def _run_pipeline_add_tensor(args: argparse.Namespace) -> int:
+    pipeline_cli = _domain_module("pipeline_cli")
     return _json_action(
         args,
         "pipeline.add_tensor",
@@ -513,7 +844,18 @@ def _run_pipeline_add_tensor(args: argparse.Namespace) -> int:
     )
 
 
+def _run_pipeline_remove_tensor(args: argparse.Namespace) -> int:
+    pipeline_cli = _domain_module("pipeline_cli")
+    return _json_action(
+        args,
+        "pipeline.remove_tensor",
+        lambda: pipeline_cli.remove_tensor(args.pipeline, args.name, force=args.force),
+        {"pipeline": str(args.pipeline), "tensor": args.name, "force": args.force},
+    )
+
+
 def _run_pipeline_add_op(args: argparse.Namespace) -> int:
+    pipeline_cli = _domain_module("pipeline_cli")
     return _json_action(
         args,
         "pipeline.add_op",
@@ -541,7 +883,18 @@ def _run_pipeline_add_op(args: argparse.Namespace) -> int:
     )
 
 
+def _run_pipeline_remove_op(args: argparse.Namespace) -> int:
+    pipeline_cli = _domain_module("pipeline_cli")
+    return _json_action(
+        args,
+        "pipeline.remove_op",
+        lambda: pipeline_cli.remove_op(args.pipeline, args.index),
+        {"pipeline": str(args.pipeline), "index": args.index},
+    )
+
+
 def _run_pipeline_set_input(args: argparse.Namespace) -> int:
+    pipeline_cli = _domain_module("pipeline_cli")
     return _json_action(
         args,
         "pipeline.set_input",
@@ -551,6 +904,7 @@ def _run_pipeline_set_input(args: argparse.Namespace) -> int:
 
 
 def _run_pipeline_set_output(args: argparse.Namespace) -> int:
+    pipeline_cli = _domain_module("pipeline_cli")
     return _json_action(
         args,
         "pipeline.set_output",
@@ -560,6 +914,7 @@ def _run_pipeline_set_output(args: argparse.Namespace) -> int:
 
 
 def _run_pipeline_validate(args: argparse.Namespace) -> int:
+    pipeline_cli = _domain_module("pipeline_cli")
     return _json_action(
         args,
         "pipeline.validate",
@@ -593,10 +948,12 @@ def _run_pipeline_inspect(args: argparse.Namespace) -> int:
             }
         )
         return 0
+    pipeline_cli = _domain_module("pipeline_cli")
     return pipeline_cli.inspect_pipeline(args.pipeline)
 
 
 def _run_pipeline_trace(args: argparse.Namespace) -> int:
+    pipeline_cli = _domain_module("pipeline_cli")
     return _json_action(
         args,
         "pipeline.trace",
@@ -611,13 +968,15 @@ def _run_pipeline_trace(args: argparse.Namespace) -> int:
 
 
 def _run_package_create(args: argparse.Namespace) -> int:
+    package_cli = _domain_module("package_cli")
     return _json_action(
         args,
         "package.create",
         lambda: package_cli.create_package(
-            package_id=args.package_id,
+            package_id=args.package_id or "",
             pipelines=args.pipeline,
             output=args.output,
+            source=args.source,
             supported_modes=args.supported_mode,
             asset_roots=args.asset_root,
             force=args.force,
@@ -627,6 +986,7 @@ def _run_package_create(args: argparse.Namespace) -> int:
         {
             "package_id": args.package_id,
             "pipelines": list(args.pipeline),
+            "source": str(args.source) if args.source else None,
             "output": str(args.output),
             "zip": args.zip or args.output.suffix == ".zip",
         },
@@ -634,6 +994,7 @@ def _run_package_create(args: argparse.Namespace) -> int:
 
 
 def _run_package_validate(args: argparse.Namespace) -> int:
+    package_cli = _domain_module("package_cli")
     return _json_action(
         args,
         "package.validate",
@@ -643,6 +1004,7 @@ def _run_package_validate(args: argparse.Namespace) -> int:
 
 
 def _run_package_inspect(args: argparse.Namespace) -> int:
+    package_cli = _domain_module("package_cli")
     if args.json:
         root = package_cli._materialize_package(args.package)
         manifest = package_cli._load_validated_manifest(root)
@@ -661,6 +1023,8 @@ def _run_package_inspect(args: argparse.Namespace) -> int:
 
 
 def _run_host(args: argparse.Namespace) -> int:
+    _preflight_run_target(args.target)
+    run_cli = _domain_module("run_cli")
     if args.json:
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
@@ -693,6 +1057,8 @@ def _run_host(args: argparse.Namespace) -> int:
 
 
 def _run_device(args: argparse.Namespace) -> int:
+    _preflight_run_target(args.target)
+    run_cli = _domain_module("run_cli")
     return run_cli.run_device(
         args.target,
         inputs=args.input,
@@ -713,6 +1079,38 @@ def _run_device(args: argparse.Namespace) -> int:
 
 def _json_requested(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "json", False) or getattr(args, "output_format", None) == "json")
+
+
+def _domain_module(name: str) -> ModuleType:
+    module = globals().get(name)
+    if isinstance(module, ModuleType):
+        return module
+    module = importlib.import_module(_DOMAIN_MODULES[name])
+    globals()[name] = module
+    return module
+
+
+def __getattr__(name: str) -> ModuleType:
+    if name in _DOMAIN_MODULES:
+        return _domain_module(name)
+    raise AttributeError(name)
+
+
+def _preflight_run_target(target: Path) -> None:
+    if target.is_file() and target.suffix.lower() == ".json":
+        raise RunTargetCliError(f"Raw pipeline JSON is not a valid run target: {target}. {_PACKAGE_TARGET_HINT}")
+
+
+def _handle_domain_error(args: argparse.Namespace, exc: Exception) -> Optional[int]:
+    error = _DOMAIN_ERRORS.get(type(exc).__name__)
+    if error is None:
+        return None
+    code, category, prefix = error
+    if _json_requested(args):
+        _print_error_json(code, category, str(exc), exit_code=1)
+        return 1
+    print(f"{prefix}: {exc}", file=sys.stderr)
+    return 1
 
 
 def _print_json(payload: dict) -> None:
@@ -762,7 +1160,7 @@ def _read_json(path: Path) -> dict:
     with open(path, "r", encoding="utf-8") as file:
         payload = json.load(file)
     if not isinstance(payload, dict):
-        raise pipeline_cli.PipelineCliError(f"JSON file must contain an object: {path}")
+        raise CliError(f"JSON file must contain an object: {path}")
     return payload
 
 

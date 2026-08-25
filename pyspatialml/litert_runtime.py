@@ -51,18 +51,14 @@ def inspect_model(model: Path, *, signature_index: int = 0) -> dict[str, Any]:
 
 def inspect_model_in_process(model: Path, *, signature_index: int) -> dict[str, Any]:
     """Inspect a model using the active Python interpreter."""
-    from ai_edge_litert.compiled_model import CompiledModel
-    from ai_edge_litert.hardware_accelerator import HardwareAccelerator
+    from ai_edge_litert.interpreter import Interpreter
 
     try:
-        compiled_model = CompiledModel.from_file(str(model), HardwareAccelerator.CPU)
-        signatures = compiled_model.get_signature_list()
-        if not signatures:
-            raise LiteRTRuntimeError(f"No signatures found in model: {model}")
-        signature_info = compiled_model.get_signature_by_index(signature_index)
-        signature_key = signature_info["key"]
-        input_details = compiled_model.get_input_tensor_details(signature_key)
-        output_details = compiled_model.get_output_tensor_details(signature_key)
+        interpreter = Interpreter(model_path=str(model), num_threads=1)
+        interpreter.allocate_tensors()
+        signature_key = _interpreter_signature_key(interpreter, signature_index)
+        input_details = interpreter.get_input_details()
+        output_details = interpreter.get_output_details()
     except LiteRTRuntimeError:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -72,8 +68,8 @@ def inspect_model_in_process(model: Path, *, signature_index: int) -> dict[str, 
         model=model,
         signature_index=signature_index,
         signature_key=signature_key,
-        input_details=input_details,
-        output_details=output_details,
+        input_details={str(detail.get("name")): detail for detail in input_details},
+        output_details={str(detail.get("name")): detail for detail in output_details},
     )
 
 
@@ -128,54 +124,35 @@ def run_model_in_process(
     output_dtypes: Optional[Sequence[Any]] = None,
 ) -> dict[str, np.ndarray]:
     """Run a LiteRT model using the active Python interpreter."""
-    from ai_edge_litert.compiled_model import CompiledModel
-    from ai_edge_litert.hardware_accelerator import HardwareAccelerator
+    from ai_edge_litert.interpreter import Interpreter
 
-    from litert_cli.core import inputs as litert_inputs
-
-    compiled_model = CompiledModel.from_file(str(model_path), HardwareAccelerator.CPU)
-    signatures = compiled_model.get_signature_list()
-    if not signatures:
-        raise LiteRTRuntimeError(f"No signatures found in model: {model_path}")
-    signature_info = compiled_model.get_signature_by_index(0)
-    signature_key = signature_info["key"]
-    signature_index = compiled_model.get_signature_index(signature_key)
-
-    input_details = compiled_model.get_input_tensor_details(signature_key)
-    model_inputs = {}
-    for model_input_name, details in input_details.items():
+    interpreter = Interpreter(model_path=str(model_path), num_threads=1)
+    interpreter.allocate_tensors()
+    input_details = interpreter.get_input_details()
+    for details in input_details:
+        model_input_name = details.get("name")
         value = _resolve_model_input(model_input_name, inputs)
         if value is None:
             raise LiteRTRuntimeError(f"Missing model input tensor: {model_input_name}")
         shape = details.get("shape", list(np.asarray(value).shape))
-        dtype = litert_inputs.get_np_dtype(details.get("dtype", "float32"))
+        shape = tuple(int(dim) for dim in np.asarray(shape).reshape(-1).tolist())
+        dtype = np.dtype(details.get("dtype", np.float32))
         array = np.asarray(value, dtype=dtype)
-        if shape and tuple(array.shape) != tuple(shape) and array.size == int(np.prod(shape)):
+        if shape and tuple(array.shape) != shape and array.size == int(np.prod(shape)):
             array = array.reshape(shape)
-        tensor_buffer = compiled_model.create_input_buffer_by_name(signature_key, model_input_name)
-        tensor_buffer.write(array)
-        model_inputs[model_input_name] = tensor_buffer
+        interpreter.set_tensor(int(details["index"]), array)
+    interpreter.invoke()
 
-    output_buffers = compiled_model.create_output_buffers(signature_index)
-    model_output_names = signatures[signature_key]["outputs"]
-    outputs_by_name = dict(zip(model_output_names, output_buffers))
-    compiled_model.run_by_name(signature_key, model_inputs, outputs_by_name)
-
-    output_details = compiled_model.get_output_tensor_details(signature_key)
+    output_details = interpreter.get_output_details()
+    model_output_names = [str(detail.get("name")) for detail in output_details]
+    output_by_name = {str(detail.get("name")): detail for detail in output_details}
     results = {}
     for index, pipeline_output_name in enumerate(output_names):
         model_output_name = _resolve_model_output_name(index, pipeline_output_name, model_output_names)
-        if model_output_name not in outputs_by_name:
+        if model_output_name not in output_by_name:
             raise LiteRTRuntimeError(f"Model output tensor not found: {model_output_name}")
-        details = output_details.get(model_output_name, {})
-        shape = details.get("shape", [])
-        dtype = litert_inputs.get_np_dtype(details.get("dtype", "float32"))
-        tensor_buffer = outputs_by_name[model_output_name]
-        read_shape = shape or (output_shapes[index] if output_shapes and index < len(output_shapes) else [])
-        element_count = int(np.prod(read_shape)) if read_shape else 1
-        array = tensor_buffer.read(element_count, dtype)
-        if read_shape:
-            array = array.reshape(read_shape)
+        details = output_by_name[model_output_name]
+        array = np.asarray(interpreter.get_tensor(int(details["index"])))
         if output_shapes and index < len(output_shapes):
             requested_shape = output_shapes[index]
             if requested_shape and array.shape != tuple(requested_shape) and array.size == int(np.prod(requested_shape)):
@@ -247,9 +224,32 @@ def _tensor_detail(name: str, detail: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "name": detail.get("name", name),
         "index": detail.get("index"),
-        "dtype": detail.get("dtype"),
-        "shape": list(detail.get("shape", [])),
+        "dtype": _serialize_dtype(detail.get("dtype")),
+        "shape": _serialize_shape(detail.get("shape", [])),
     }
+
+
+def _interpreter_signature_key(interpreter: Any, signature_index: int) -> str:
+    signatures = interpreter.get_signature_list()
+    if not signatures:
+        if signature_index == 0:
+            return "<placeholder signature>"
+        raise LiteRTRuntimeError(f"Signature index {signature_index} not found")
+    keys = list(signatures)
+    if signature_index < 0 or signature_index >= len(keys):
+        raise LiteRTRuntimeError(f"Signature index {signature_index} not found")
+    return str(keys[signature_index])
+
+
+def _serialize_dtype(dtype: Any) -> str:
+    try:
+        return np.dtype(dtype).name
+    except TypeError:
+        return str(dtype)
+
+
+def _serialize_shape(shape: Any) -> list[int]:
+    return [int(dim) for dim in np.asarray(shape, dtype=np.int64).reshape(-1).tolist()]
 
 
 def _resolve_model_input(name: str, inputs: Mapping[str, np.ndarray]) -> Optional[np.ndarray]:
@@ -273,34 +273,40 @@ import json
 import sys
 from pathlib import Path
 
-from ai_edge_litert.compiled_model import CompiledModel
-from ai_edge_litert.hardware_accelerator import HardwareAccelerator
+import numpy as np
+from ai_edge_litert.interpreter import Interpreter
 
 model = Path(sys.argv[1])
 signature_index = int(sys.argv[2])
-compiled_model = CompiledModel.from_file(str(model), HardwareAccelerator.CPU)
-signatures = compiled_model.get_signature_list()
-if not signatures:
-    raise RuntimeError(f"No signatures found in model: {model}")
-signature_info = compiled_model.get_signature_by_index(signature_index)
-signature_key = signature_info["key"]
-input_details = compiled_model.get_input_tensor_details(signature_key)
-output_details = compiled_model.get_output_tensor_details(signature_key)
+interpreter = Interpreter(model_path=str(model), num_threads=1)
+interpreter.allocate_tensors()
+signatures = interpreter.get_signature_list()
+if signatures:
+    keys = list(signatures)
+    if signature_index < 0 or signature_index >= len(keys):
+        raise RuntimeError(f"Signature index {signature_index} not found")
+    signature_key = str(keys[signature_index])
+else:
+    if signature_index != 0:
+        raise RuntimeError(f"Signature index {signature_index} not found")
+    signature_key = "<placeholder signature>"
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
 
-def tensor_detail(name, detail):
+def tensor_detail(detail):
     return {
-        "name": detail.get("name", name),
+        "name": detail.get("name"),
         "index": detail.get("index"),
-        "dtype": detail.get("dtype"),
-        "shape": list(detail.get("shape", [])),
+        "dtype": np.dtype(detail.get("dtype")).name,
+        "shape": [int(dim) for dim in np.asarray(detail.get("shape", []), dtype=np.int64).reshape(-1).tolist()],
     }
 
 print(json.dumps({
     "model": str(model),
     "signature_index": signature_index,
     "signature_key": signature_key,
-    "inputs": [tensor_detail(name, detail) for name, detail in input_details.items()],
-    "outputs": [tensor_detail(name, detail) for name, detail in output_details.items()],
+    "inputs": [tensor_detail(detail) for detail in input_details],
+    "outputs": [tensor_detail(detail) for detail in output_details],
 }))
 '''
 
@@ -310,57 +316,41 @@ import json
 import sys
 import numpy as np
 
-from ai_edge_litert.compiled_model import CompiledModel
-from ai_edge_litert.hardware_accelerator import HardwareAccelerator
-from litert_cli.core import inputs as litert_inputs
+from ai_edge_litert.interpreter import Interpreter
 
 request = json.load(open(sys.argv[1], "r", encoding="utf-8"))
 loaded = np.load(request["input_path"])
 inputs = {name: loaded[name] for name in loaded.files}
-compiled_model = CompiledModel.from_file(request["model_path"], HardwareAccelerator.CPU)
-signatures = compiled_model.get_signature_list()
-if not signatures:
-    raise RuntimeError(f"No signatures found in model: {request['model_path']}")
-signature_info = compiled_model.get_signature_by_index(0)
-signature_key = signature_info["key"]
-signature_index = compiled_model.get_signature_index(signature_key)
-input_details = compiled_model.get_input_tensor_details(signature_key)
-model_inputs = {}
-for model_input_name, details in input_details.items():
+interpreter = Interpreter(model_path=request["model_path"], num_threads=1)
+interpreter.allocate_tensors()
+input_details = interpreter.get_input_details()
+for details in input_details:
+    model_input_name = details.get("name")
     value = inputs.get(model_input_name)
     if value is None and len(inputs) == 1:
         value = next(iter(inputs.values()))
     if value is None:
         raise RuntimeError(f"Missing model input tensor: {model_input_name}")
     shape = details.get("shape", list(np.asarray(value).shape))
-    dtype = litert_inputs.get_np_dtype(details.get("dtype", "float32"))
+    shape = tuple(int(dim) for dim in np.asarray(shape).reshape(-1).tolist())
+    dtype = np.dtype(details.get("dtype", np.float32))
     array = np.asarray(value, dtype=dtype)
-    if shape and tuple(array.shape) != tuple(shape) and array.size == int(np.prod(shape)):
+    if shape and tuple(array.shape) != shape and array.size == int(np.prod(shape)):
         array = array.reshape(shape)
-    tensor_buffer = compiled_model.create_input_buffer_by_name(signature_key, model_input_name)
-    tensor_buffer.write(array)
-    model_inputs[model_input_name] = tensor_buffer
+    interpreter.set_tensor(int(details["index"]), array)
 
-output_buffers = compiled_model.create_output_buffers(signature_index)
-model_output_names = signatures[signature_key]["outputs"]
-outputs_by_name = dict(zip(model_output_names, output_buffers))
-compiled_model.run_by_name(signature_key, model_inputs, outputs_by_name)
-output_details = compiled_model.get_output_tensor_details(signature_key)
+interpreter.invoke()
+output_details = interpreter.get_output_details()
+model_output_names = [str(detail.get("name")) for detail in output_details]
+output_by_name = {str(detail.get("name")): detail for detail in output_details}
 results = {}
 output_shapes = request.get("output_shapes", [])
 output_dtypes = request.get("output_dtypes", [])
 for index, pipeline_output_name in enumerate(request["output_names"]):
     model_output_name = pipeline_output_name if pipeline_output_name in model_output_names else model_output_names[index]
-    details = output_details.get(model_output_name, {})
-    shape = details.get("shape", [])
-    dtype = litert_inputs.get_np_dtype(details.get("dtype", "float32"))
-    tensor_buffer = outputs_by_name[model_output_name]
+    details = output_by_name[model_output_name]
+    array = np.asarray(interpreter.get_tensor(int(details["index"])))
     requested_shape = output_shapes[index] if index < len(output_shapes) else None
-    read_shape = shape or requested_shape or []
-    element_count = int(np.prod(read_shape)) if read_shape else 1
-    array = tensor_buffer.read(element_count, dtype)
-    if read_shape:
-        array = array.reshape(read_shape)
     if requested_shape and array.shape != tuple(requested_shape) and array.size == int(np.prod(requested_shape)):
         array = array.reshape(requested_shape)
     if index < len(output_dtypes):

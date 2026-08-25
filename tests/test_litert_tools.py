@@ -136,3 +136,55 @@ def test_install_litert_wraps_pip_failures(tmp_path, monkeypatch):
 
     with pytest.raises(LiteRTToolError, match="Failed to install litert-cli==0.1.0: stderr text"):
         litert_tools.install_litert_cli(cache_dir=tmp_path)
+
+
+def test_install_litert_force_recreates_managed_environment(tmp_path, monkeypatch):
+    stale_file = tmp_path / "litert-cli" / "stale.txt"
+    stale_file.parent.mkdir(parents=True)
+    stale_file.write_text("stale", encoding="utf-8")
+    venv_python = tmp_path / "litert-cli" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
+    litert = _write_executable(managed_litert_bin(tmp_path))
+    calls = []
+
+    class _EnvBuilder:
+        def __init__(self, *, with_pip=False, clear=False):
+            calls.append(("builder", with_pip, clear))
+
+        def create(self, venv_dir):
+            calls.append(("create", venv_dir))
+            venv_python.parent.mkdir(parents=True, exist_ok=True)
+            venv_python.write_text("", encoding="utf-8")
+
+    def _run(argv, **_kwargs):
+        calls.append(("run", argv))
+        _write_executable(litert)
+
+    monkeypatch.setattr(litert_tools.venv, "EnvBuilder", _EnvBuilder)
+    monkeypatch.setattr(litert_tools.subprocess, "run", _run)
+
+    resolved = litert_tools.install_litert_cli(cache_dir=tmp_path, force=True)
+
+    assert resolved.path == litert
+    assert resolved.managed
+    assert not stale_file.exists()
+    assert managed_litert_spec_file(tmp_path).read_text(encoding="utf-8") == "litert-cli==0.1.0\n"
+    assert ("create", tmp_path / "litert-cli") in calls
+    assert any(item[0] == "run" for item in calls)
+
+
+def test_repair_litert_recreates_managed_environment(tmp_path, monkeypatch):
+    calls = []
+
+    def _install_litert_cli(*, cache_dir=None, package="", version="", force=False):
+        calls.append((cache_dir, package, version, force))
+        return LiteRTCli(path=managed_litert_bin(cache_dir), managed=True)
+
+    monkeypatch.setattr(litert_tools, "install_litert_cli", _install_litert_cli)
+
+    resolved = litert_tools.repair_litert_cli(cache_dir=tmp_path, package="custom-litert", version="1.2.3")
+
+    assert resolved.path == managed_litert_bin(tmp_path)
+    assert resolved.managed
+    assert calls == [(tmp_path, "custom-litert", "1.2.3", True)]
