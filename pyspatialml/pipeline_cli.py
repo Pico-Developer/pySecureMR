@@ -21,7 +21,7 @@ import json
 import shutil
 import sys
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence, Union
 
 import numpy as np
 
@@ -77,7 +77,11 @@ _OP_ALIASES = {
     "arithmetic": "XR_SECURE_MR_OPERATOR_TYPE_ARITHMETIC_COMPOSE_PICO",
     "assignment": "XR_SECURE_MR_OPERATOR_TYPE_ASSIGNMENT_PICO",
     "run_model_inference": "XR_SECURE_MR_OPERATOR_TYPE_RUN_MODEL_INFERENCE_PICO",
+    "scenegraph_visibility": "XR_SECURE_MR_OPERATOR_TYPE_SCENEGRAPH_VISIBILITY_PICO",
+    "update_component": "XR_SECURE_MR_OPERATOR_TYPE_UPDATE_COMPONENT_PICO",
 }
+_OP_SCENEGRAPH_VISIBILITY = _OP_ALIASES["scenegraph_visibility"]
+_OP_UPDATE_COMPONENT = _OP_ALIASES["update_component"]
 _XR_ONLY_OPERATORS = {
     "LOAD_TEXTURE",
     "RENDER_TEXT",
@@ -124,8 +128,8 @@ _OP_ARITY: Mapping[str, tuple[int, Optional[int], int, Optional[int]]] = {
     "SVD": (1, 1, 3, 3),
     "NORM": (1, 1, 1, 1),
     "SWAP_HWC_CHW": (1, 1, 1, 1),
-    "SCENEGRAPH_VISIBILITY": (1, 1, 1, 1),
-    "UPDATE_COMPONENT": (1, 1, 1, 1),
+    "SCENEGRAPH_VISIBILITY": (1, 2, 0, 0),
+    "UPDATE_COMPONENT": (1, 2, 0, 0),
     "JAVASCRIPT": (0, None, 1, None),
     "MICROPHONE": (0, 0, 1, 1),
     "SPEAKER": (1, 1, 1, 1),
@@ -172,6 +176,10 @@ def add_tensor(
     }
     if usage_value == _USAGE_ALIASES["matrix"]:
         tensor_spec["flag"] = mat_flag(EDataType(data_type), channels)
+    if usage_value == _USAGE_ALIASES["gltf"]:
+        tensor_spec["tensor_type"] = "gltf"
+        tensor_spec["is_gltf"] = True
+        tensor_spec["is_placeholder"] = True
     if value is not None:
         tensor_spec["value"] = _parse_value_list(value)
 
@@ -212,7 +220,13 @@ def add_op(
     _validate_operator_arity(normalized_op_type, inputs=inputs, outputs=outputs)
     if normalized_op_type == _OP_ALIASES["arithmetic"] and not expression:
         raise PipelineCliError("Arithmetic operators require --expression")
-    _validate_required_operator_metadata(normalized_op_type, attrs=attrs, flag=flag, model=model)
+    _validate_required_operator_metadata(
+        normalized_op_type,
+        inputs=inputs,
+        attrs=attrs,
+        flag=flag,
+        model=model,
+    )
 
     op = {
         "type": normalized_op_type,
@@ -243,6 +257,7 @@ def add_op(
             "model_target": model_target,
             "cpu_target_num_threads": int(cpu_target_num_threads),
         }
+    _apply_spatial_operator_fields(op, attrs)
 
     spec.setdefault("operators", []).append(op)
     _validate_and_write_operator_update(path, spec)
@@ -353,6 +368,7 @@ def _format_count_range(minimum: int, maximum: Optional[int]) -> str:
 def _validate_required_operator_metadata(
     op_type: str,
     *,
+    inputs: Sequence[str],
     attrs: Sequence[str],
     flag: Optional[str],
     model: Optional[str],
@@ -369,8 +385,37 @@ def _validate_required_operator_metadata(
         )
     if op_type.endswith("UPDATE_GLTF_PICO") and not attrs:
         raise PipelineCliError("update_gltf operators require --attr with update type")
+    if op_type == _OP_UPDATE_COMPONENT and len(inputs) < 2 and not attrs:
+        raise PipelineCliError("update_component operators require a second input tensor or --attr enabled/data")
     if op_type == _OP_ALIASES["run_model_inference"] and model is None:
         raise PipelineCliError("run_model_inference operators require --model")
+
+
+def _apply_spatial_operator_fields(op: dict[str, Any], attrs: Sequence[str]) -> None:
+    if op["type"] == _OP_SCENEGRAPH_VISIBILITY:
+        op["type"] = "scenegraph_visibility"
+        if op["inputs"]:
+            op["scenegraph"] = op["inputs"][0]
+        if attrs:
+            op["visible"] = _parse_bool_or_tensor(attrs[0])
+    elif op["type"] == _OP_UPDATE_COMPONENT:
+        op["type"] = "update_component"
+        if op["inputs"]:
+            op["scenegraph"] = op["inputs"][0]
+        if attrs:
+            value = _parse_bool_or_tensor(attrs[0])
+            op["enabled" if isinstance(value, bool) else "data"] = value
+    if op["type"] in {"scenegraph_visibility", "update_component"}:
+        op.pop("attrs", None)
+
+
+def _parse_bool_or_tensor(value: str) -> Union[bool, str]:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return value
 
 
 def set_input(path: Path, names: Sequence[str]) -> int:

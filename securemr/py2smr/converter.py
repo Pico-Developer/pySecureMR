@@ -148,6 +148,21 @@ def _op_to_spec(op: TracedOp) -> Dict[str, Any]:
             spec["text"] = op.attrs[1]
     elif _OP_UPDATE_GLTF is not None and op.op_type == _OP_UPDATE_GLTF and op.attrs:
         spec["update_type"] = op.attrs[0]
+    elif op.op_type == EOperatorType.SCENEGRAPH_VISIBILITY:
+        spec["type"] = "scenegraph_visibility"
+        if op.input_names:
+            spec["scenegraph"] = op.input_names[0]
+        if op.attrs:
+            spec["visible"] = _parse_bool_or_tensor(op.attrs[0])
+        spec["outputs"] = []
+    elif op.op_type == EOperatorType.UPDATE_COMPONENT:
+        spec["type"] = "update_component"
+        if op.input_names:
+            spec["scenegraph"] = op.input_names[0]
+        if op.attrs:
+            value = _parse_bool_or_tensor(op.attrs[0])
+            spec["enabled" if isinstance(value, bool) else "data"] = value
+        spec["outputs"] = []
     elif _OP_RUN_MODEL_INFERENCE is not None and op.op_type == _OP_RUN_MODEL_INFERENCE:
         if "model_type" in op.extra_info:
             spec["model_type"] = op.extra_info["model_type"]
@@ -172,6 +187,15 @@ def _op_to_spec(op: TracedOp) -> Dict[str, Any]:
     return spec
 
 
+def _parse_bool_or_tensor(value: str) -> Union[bool, str]:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return value
+
+
 def trace_to_pipeline_spec(ctx: TraceContext) -> Dict[str, Any]:
     """Convert a TraceContext to a pipeline specification dictionary.
 
@@ -193,7 +217,17 @@ def trace_to_pipeline_spec(ctx: TraceContext) -> Dict[str, Any]:
 
     # Determine inputs and outputs
     inputs = [name for name, info in ctx.tensors.items() if info.is_input]
-    outputs = [name for name, info in ctx.tensors.items() if info.is_output]
+    command_only_outputs = {
+        output_name
+        for op in ctx.operations
+        if op.op_type in {EOperatorType.SCENEGRAPH_VISIBILITY, EOperatorType.UPDATE_COMPONENT}
+        for output_name in op.output_names
+    }
+    outputs = [
+        name
+        for name, info in ctx.tensors.items()
+        if info.is_output and name not in command_only_outputs
+    ]
 
     # Fix up tensor specs for scalar-result operators (ALL/ANY).
     scalar_result_ops = {EOperatorType.ALL, EOperatorType.ANY}

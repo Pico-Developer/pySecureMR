@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -99,8 +100,10 @@ def run_host(
     inputs: Sequence[str] = (),
     output_dir: Optional[Path] = None,
     dumps: Sequence[str] = (),
+    duration: float = 15.0,
 ) -> int:
     """Run a pipeline package on the host Python executor."""
+    _validate_host_run_args(duration=duration)
     run_targets, package_context = _resolve_pipeline_targets(target, pipeline_ids=pipeline_ids)
     input_values, default_input_path = _parse_host_inputs(inputs)
     try:
@@ -132,6 +135,7 @@ def run_host(
 def run_device(
     target: Path,
     *,
+    mode: Optional[str] = None,
     input_path: Optional[str] = None,
     inputs: Sequence[str] = (),
     pipeline_ids: Sequence[str] = (),
@@ -147,11 +151,8 @@ def run_device(
     device: Optional[str] = None,
     as_json: bool = False,
 ) -> int:
-    """Run a pipeline package on a connected device through the XR runner APK."""
-    script = _xr_runner_script()
-    if not script.is_file():
-        raise RunCliError(f"XR runner script not found: {script}")
-    _validate_run_package_target(target)
+    """Run a pipeline package on a connected device through a runner APK."""
+    normalized_mode = _validate_run_package_target(target, mode=mode)
     _validate_device_run_args(
         inputs=inputs,
         dumps=dumps,
@@ -159,6 +160,9 @@ def run_device(
         interval_ms=interval_ms,
         apk=apk,
     )
+    script = _device_runner_script(normalized_mode)
+    if not script.is_file():
+        raise RunCliError(f"{normalized_mode.upper()} runner script not found: {script}")
 
     cmd = [sys.executable, str(script), str(target)]
     all_inputs = list(inputs)
@@ -187,12 +191,14 @@ def run_device(
     if device:
         cmd.extend(["--device", device])
 
+    env = _runner_subprocess_env()
     if as_json:
-        result = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        result = subprocess.run(cmd, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         payload = {
             "ok": result.returncode == 0,
             "command": "run.device",
             "target": str(target),
+            "mode": normalized_mode,
             "argv": cmd,
             "returncode": result.returncode,
             "pipelines": list(pipeline_ids),
@@ -209,11 +215,28 @@ def run_device(
         }
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return result.returncode
-    result = subprocess.run(cmd)
+    result = subprocess.run(cmd, env=env)
     return result.returncode
 
 
-def _validate_run_package_target(target: Path) -> None:
+def _runner_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    package_root = str(Path(__file__).resolve().parent.parent)
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = package_root if not existing else f"{package_root}{os.pathsep}{existing}"
+    return env
+
+
+def _normalize_device_mode(mode: Optional[str]) -> Optional[str]:
+    if mode is None:
+        return None
+    normalized = str(mode).strip().lower()
+    if normalized not in {"xr", "spatial"}:
+        raise RunCliError(f"--mode must be 'xr' or 'spatial', got: {mode}")
+    return normalized
+
+
+def _validate_run_package_target(target: Path, *, mode: Optional[str] = None) -> str:
     if target.is_file() and target.suffix.lower() == ".json":
         raise RunCliError(f"Raw pipeline JSON is not a valid run target: {target}. {_PACKAGE_TARGET_HINT}")
     if not target.exists():
@@ -221,10 +244,53 @@ def _validate_run_package_target(target: Path) -> None:
     package_context = _materialize_package(target)
     try:
         manifest = _load_run_manifest(package_context.root)
+        normalized_mode = _normalize_device_mode(mode)
+        resolved_mode = (
+            _validate_manifest_supports_mode(manifest, normalized_mode)
+            if normalized_mode is not None
+            else _infer_device_mode_from_manifest(manifest)
+        )
         _validate_manifest_pipeline_files(package_context.root, manifest)
+        return resolved_mode
     finally:
         if package_context.cleanup_root is not None:
             shutil.rmtree(package_context.cleanup_root, ignore_errors=True)
+
+
+def _infer_device_mode_from_manifest(manifest: Mapping[str, Any]) -> str:
+    supported_modes = _manifest_supported_modes(manifest)
+    if supported_modes is None:
+        return "spatial"
+    if "spatial" in supported_modes:
+        return "spatial"
+    if "xr" in supported_modes:
+        return "xr"
+    raise RunCliError(
+        "Package manifest runtime.supported_modes must include 'spatial' or 'xr': "
+        f"{', '.join(supported_modes) or '-'}"
+    )
+
+
+def _manifest_supported_modes(manifest: Mapping[str, Any]) -> Optional[list[str]]:
+    runtime = manifest.get("runtime")
+    supported_modes = runtime.get("supported_modes") if isinstance(runtime, Mapping) else None
+    if supported_modes is None:
+        return None
+    if not isinstance(supported_modes, list):
+        raise RunCliError("Package manifest runtime.supported_modes must be a list")
+    return [str(item).strip().lower() for item in supported_modes]
+
+
+def _validate_manifest_supports_mode(manifest: Mapping[str, Any], mode: str) -> str:
+    supported_modes = _manifest_supported_modes(manifest)
+    if supported_modes is None:
+        return mode
+    if mode not in supported_modes:
+        raise RunCliError(
+            f"Package manifest runtime.supported_modes does not include '{mode}': "
+            f"{', '.join(str(item) for item in supported_modes) or '-'}"
+        )
+    return mode
 
 
 def _validate_manifest_pipeline_files(root: Path, manifest: Mapping[str, Any]) -> None:
@@ -264,6 +330,11 @@ def _validate_device_run_args(
             raise RunCliError(f"Input file not found: {path}")
 
 
+def _validate_host_run_args(*, duration: float) -> None:
+    if duration <= 0:
+        raise RunCliError("--duration must be greater than 0")
+
+
 def print_run_error(exc: Exception) -> None:
     """Print a concise run command error."""
     print(f"Error [PSM_RUN]: {exc}", file=sys.stderr)
@@ -275,6 +346,16 @@ def _section_header(title: str) -> str:
 
 def _xr_runner_script() -> Path:
     return Path(__file__).resolve().parent / "xr_pipeline_runner" / "scripts" / "run_xr_pipeline.py"
+
+
+def _spatial_runner_script() -> Path:
+    return Path(__file__).resolve().parent / "spatial_pipeline_runner" / "scripts" / "run_spatial_pipeline.py"
+
+
+def _device_runner_script(mode: str) -> Path:
+    if mode == "spatial":
+        return _spatial_runner_script()
+    return _xr_runner_script()
 
 
 def _run_one_pipeline(
@@ -363,7 +444,7 @@ def _print_host_summary(results: Sequence[HostPipelineResult], total_elapsed_ms:
             for item in result.display_outputs:
                 if item["kind"] == "gltf":
                     exists = "yes" if item.get("exists") else "no"
-                    print(f"      {item['name']}: asset={item['asset']} exists={exists}")
+                    print(f"      {item['name']}: asset reference {item['asset']} exists={exists}")
                 elif item["kind"] == "pose":
                     translation = item.get("translation")
                     if translation is not None:

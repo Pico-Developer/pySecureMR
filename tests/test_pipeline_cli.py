@@ -52,6 +52,19 @@ def test_add_tensor_writes_matrix_descriptor_and_boundaries(tmp_path):
     assert spec["outputs"] == ["image"]
 
 
+def test_add_tensor_marks_gltf_usage_for_sdk_loader(tmp_path):
+    pipeline = tmp_path / "pipeline.json"
+    pipeline_cli.init_pipeline(pipeline)
+
+    pipeline_cli.add_tensor(pipeline, "scene", shape="1,1", dtype="uint8", usage="gltf")
+
+    tensor = _read_json(pipeline)["tensors"]["scene"]
+    assert tensor["usage"] == 7
+    assert tensor["tensor_type"] == "gltf"
+    assert tensor["is_gltf"] is True
+    assert tensor["is_placeholder"] is True
+
+
 def test_add_tensor_supports_scalar_values(tmp_path):
     pipeline = tmp_path / "pipeline.json"
     pipeline_cli.init_pipeline(pipeline)
@@ -286,14 +299,13 @@ def test_add_op_rejects_spatial_only_operator_when_manifest_supports_xr(tmp_path
     )
     pipeline_cli.init_pipeline(pipeline)
     pipeline_cli.add_tensor(pipeline, "component", shape="1,1", dtype="uint8")
-    pipeline_cli.add_tensor(pipeline, "out", shape="1,1", dtype="uint8")
 
     with pytest.raises(pipeline_cli.PipelineCliError, match="Spatial-only operator.*only includes xr"):
         pipeline_cli.add_op(
             pipeline,
             "update_component",
             inputs=["component"],
-            outputs=["out"],
+            outputs=[],
             attrs=["visibility"],
         )
 
@@ -340,17 +352,53 @@ def test_add_op_with_spatial_only_operator_narrows_both_mode_manifest(tmp_path):
     )
     pipeline_cli.init_pipeline(pipeline)
     pipeline_cli.add_tensor(pipeline, "component", shape="1,1", dtype="uint8")
-    pipeline_cli.add_tensor(pipeline, "out", shape="1,1", dtype="uint8")
 
     pipeline_cli.add_op(
         pipeline,
         "update_component",
         inputs=["component"],
-        outputs=["out"],
+        outputs=[],
         attrs=["visibility"],
     )
 
     assert _read_json(manifest)["runtime"]["supported_modes"] == ["spatial"]
+
+
+def test_add_op_spatial_only_aliases_write_sdk_fields(tmp_path):
+    pipeline = tmp_path / "scene.json"
+    pipeline_cli.init_pipeline(pipeline)
+    pipeline_cli.add_tensor(pipeline, "scene", shape="1,1", dtype="uint8", usage="gltf")
+
+    pipeline_cli.add_op(
+        pipeline,
+        "scenegraph_visibility",
+        inputs=["scene"],
+        outputs=[],
+        attrs=["false"],
+    )
+    pipeline_cli.add_op(
+        pipeline,
+        "update_component",
+        inputs=["scene"],
+        outputs=[],
+        attrs=["true"],
+    )
+
+    operators = _read_json(pipeline)["operators"]
+    assert operators[0] == {
+        "type": "scenegraph_visibility",
+        "inputs": ["scene"],
+        "outputs": [],
+        "scenegraph": "scene",
+        "visible": False,
+    }
+    assert operators[1] == {
+        "type": "update_component",
+        "inputs": ["scene"],
+        "outputs": [],
+        "scenegraph": "scene",
+        "enabled": True,
+    }
 
 
 def test_remove_op_widens_manifest_when_no_exclusive_operators_remain(tmp_path):
@@ -467,7 +515,6 @@ def test_add_op_rejects_mixing_xr_and_spatial_only_operators_without_manifest(tm
     pipeline_cli.init_pipeline(pipeline)
     pipeline_cli.add_tensor(pipeline, "gltf", shape="1,1", dtype="uint8", usage="gltf")
     pipeline_cli.add_tensor(pipeline, "component", shape="1,1", dtype="uint8")
-    pipeline_cli.add_tensor(pipeline, "out", shape="1,1", dtype="uint8")
     pipeline_cli.add_op(
         pipeline,
         "render_text",
@@ -481,7 +528,7 @@ def test_add_op_rejects_mixing_xr_and_spatial_only_operators_without_manifest(tm
             pipeline,
             "update_component",
             inputs=["component"],
-            outputs=["out"],
+            outputs=[],
             attrs=["visibility"],
         )
 

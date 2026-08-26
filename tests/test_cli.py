@@ -940,6 +940,45 @@ def test_pipeline_add_op_model_writes_inline_litert_metadata(tmp_path):
     assert "model_id" not in op
 
 
+def test_pipeline_add_op_accepts_spatial_only_aliases(tmp_path):
+    pipeline = tmp_path / "pipeline.json"
+    assert cli_module.main(["pipeline", "init", str(pipeline)]) == 0
+    assert cli_module.main(
+        ["pipeline", "add-tensor", str(pipeline), "scene", "--shape", "1,1", "--dtype", "uint8"]
+    ) == 0
+
+    assert cli_module.main(
+        [
+            "pipeline",
+            "add-op",
+            str(pipeline),
+            "scenegraph_visibility",
+            "--input",
+            "scene",
+            "--attr",
+            "false",
+        ]
+    ) == 0
+    assert cli_module.main(
+        [
+            "pipeline",
+            "add-op",
+            str(pipeline),
+            "update_component",
+            "--input",
+            "scene",
+            "--attr",
+            "true",
+        ]
+    ) == 0
+
+    operators = json.loads(pipeline.read_text(encoding="utf-8"))["operators"]
+    assert operators[0]["type"] == "scenegraph_visibility"
+    assert operators[0]["visible"] is False
+    assert operators[1]["type"] == "update_component"
+    assert operators[1]["enabled"] is True
+
+
 def test_pipeline_command_reports_builder_errors(capsys, tmp_path):
     missing = tmp_path / "missing.json"
 
@@ -1305,6 +1344,8 @@ def test_run_host_command_runs_pipeline_and_saves_outputs(capsys, tmp_path):
             f"x={sample}",
             "--output-dir",
             str(output_dir),
+            "--duration",
+            "2.5",
         ]
     ) == 0
 
@@ -1366,6 +1407,8 @@ def test_run_host_command_json_wraps_summary(capsys, tmp_path):
             f"x={sample}",
             "--output-dir",
             str(output_dir),
+            "--duration",
+            "2.5",
             "--json",
         ]
     ) == 0
@@ -1374,6 +1417,7 @@ def test_run_host_command_json_wraps_summary(capsys, tmp_path):
     assert payload["ok"] is True
     assert payload["command"] == "run.host"
     assert payload["target"] == str(package)
+    assert payload["duration"] == 2.5
     assert "Host Run Summary" in payload["stdout"]
 
 

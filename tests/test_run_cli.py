@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pyspatialml import package_cli, run_cli
+from pyspatialml import device_runner_base, package_cli, run_cli
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FACE_FIXTURE = REPO_ROOT / "tests" / "data" / "face_mediapipe_package"
@@ -32,14 +32,14 @@ def _package_output(output_dir, pipeline_id="main"):
     return output_dir / pipeline_id
 
 
-def _write_device_package_manifest(package, *, pipeline_id="main"):
+def _write_device_package_manifest(package, *, pipeline_id="main", supported_modes=None):
     package.mkdir()
     pipeline_path = package / "pipeline" / f"{pipeline_id}.json"
     _write_json(pipeline_path, _simple_pipeline())
-    _write_json(
-        package / "manifest.json",
-        {"id": "demo", "pipelines": [{"id": pipeline_id, "path": f"pipeline/{pipeline_id}.json"}]},
-    )
+    manifest = {"id": "demo", "pipelines": [{"id": pipeline_id, "path": f"pipeline/{pipeline_id}.json"}]}
+    if supported_modes is not None:
+        manifest["runtime"] = {"supported_modes": supported_modes}
+    _write_json(package / "manifest.json", manifest)
 
 
 def _simple_pipeline():
@@ -135,6 +135,14 @@ def test_run_host_pipeline_json_prints_summary_and_saves_outputs(capsys, tmp_pat
     assert "Host Run Summary" in captured.out
     assert "main:" in captured.out
     assert "Total host run time:" in captured.out
+
+
+def test_run_host_rejects_non_positive_duration(tmp_path):
+    pipeline = tmp_path / "pipeline.json"
+    _write_json(pipeline, _simple_pipeline())
+
+    with pytest.raises(run_cli.RunCliError, match="--duration"):
+        run_cli.run_host(_package_pipeline(tmp_path, pipeline), duration=0)
 
 
 def test_run_host_summary_marks_all_zero_and_truncated_preview(capsys, tmp_path):
@@ -580,7 +588,7 @@ def test_run_host_dumps_selected_tensor(tmp_path):
     assert not (_package_output(output_dir) / "dumped" / "y.npy").exists()
 
 
-def test_run_host_dump_all_saves_inputs_intermediates_and_outputs(tmp_path):
+def test_run_host_dump_all_saves_inputs_intermediates_and_outputs(capsys, tmp_path):
     pipeline = tmp_path / "pipeline.json"
     sample = tmp_path / "x.npy"
     output_dir = tmp_path / "outputs"
@@ -596,6 +604,8 @@ def test_run_host_dump_all_saves_inputs_intermediates_and_outputs(tmp_path):
 
     np.testing.assert_allclose(np.load(_package_output(output_dir) / "all_tensors" / "x.npy"), np.ones((2, 2), dtype=np.float32))
     np.testing.assert_allclose(np.load(_package_output(output_dir) / "all_tensors" / "y.npy"), np.ones((2, 2), dtype=np.float32) * 2.0)
+    captured = capsys.readouterr()
+    assert "Dumped tensors:" not in captured.out
 
 
 def test_run_host_errors_for_missing_dump_tensor(tmp_path):
@@ -662,7 +672,7 @@ def test_run_host_writes_display_summary_for_pose_and_gltf(capsys, tmp_path):
     assert "Tensor outputs: 1" in captured.out
     assert "Host note: spatial display outputs are not rendered on host." in captured.out
     assert "frame_pose: translation=[1.0, 2.0, 3.0]" in captured.out
-    assert "frame_gltf: asset=gltf/frame.gltf exists=yes" in captured.out
+    assert "frame_gltf: asset reference gltf/frame.gltf exists=yes" in captured.out
     assert summary["host_note"] == "Host mode does not render spatial glTF output."
     assert summary["outputs"][0]["name"] == "frame_pose"
     assert summary["outputs"][0]["translation"] == [1.0, 2.0, 3.0]
@@ -876,7 +886,7 @@ def test_run_host_rejects_bad_input_format(tmp_path):
         run_cli.run_host(_package_pipeline(tmp_path, pipeline), inputs=["bad-input"])
 
 
-def test_run_device_invokes_xr_runner_script(monkeypatch, tmp_path):
+def test_run_device_invokes_xr_runner_script_when_mode_is_explicit(monkeypatch, tmp_path):
     package = tmp_path / "pkg"
     _write_device_package_manifest(package)
     image = tmp_path / "face.jpg"
@@ -890,8 +900,8 @@ def test_run_device_invokes_xr_runner_script(monkeypatch, tmp_path):
     script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
     monkeypatch.setattr(run_cli, "_xr_runner_script", lambda: script)
 
-    def _run(cmd):
-        calls.append(cmd)
+    def _run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
         class Result:
             returncode = 7
         return Result()
@@ -900,6 +910,7 @@ def test_run_device_invokes_xr_runner_script(monkeypatch, tmp_path):
 
     assert run_cli.run_device(
         package,
+        mode="xr",
         inputs=[str(image), f"vst_right_image={image}"],
         pipeline_ids=["detection", "display"],
         output_dir=output_dir,
@@ -914,7 +925,8 @@ def test_run_device_invokes_xr_runner_script(monkeypatch, tmp_path):
         device="serial-1",
     ) == 7
 
-    cmd = calls[0]
+    cmd, kwargs = calls[0]
+    assert "PYTHONPATH" in kwargs["env"]
     assert cmd[0] == run_cli.sys.executable
     assert cmd[1] == str(script)
     assert cmd[2] == str(package)
@@ -934,15 +946,42 @@ def test_run_device_invokes_xr_runner_script(monkeypatch, tmp_path):
     assert "--device" in cmd and "serial-1" in cmd
 
 
-def test_run_device_uses_default_duration(monkeypatch, tmp_path):
+def test_run_device_invokes_spatial_runner_script(monkeypatch, tmp_path):
     package = tmp_path / "pkg"
-    _write_device_package_manifest(package)
-    script = tmp_path / "run_xr_pipeline.py"
+    _write_device_package_manifest(package, supported_modes=["spatial"])
+    script = tmp_path / "run_spatial_pipeline.py"
     script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
     calls = []
-    monkeypatch.setattr(run_cli, "_xr_runner_script", lambda: script)
+    monkeypatch.setattr(run_cli, "_spatial_runner_script", lambda: script)
 
-    def _run(cmd):
+    def _run(cmd, **_kwargs):
+        calls.append(cmd)
+
+        class Result:
+            returncode = 0
+
+        return Result()
+
+    monkeypatch.setattr(run_cli.subprocess, "run", _run)
+
+    assert run_cli.run_device(package, mode="spatial") == 0
+
+    cmd = calls[0]
+    assert cmd[0] == run_cli.sys.executable
+    assert cmd[1] == str(script)
+    assert cmd[2] == str(package)
+    assert "--duration" in cmd and "15.0" in cmd
+
+
+def test_run_device_auto_selects_spatial_runner_by_default(monkeypatch, tmp_path):
+    package = tmp_path / "pkg"
+    _write_device_package_manifest(package)
+    script = tmp_path / "run_spatial_pipeline.py"
+    script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(run_cli, "_spatial_runner_script", lambda: script)
+
+    def _run(cmd, **_kwargs):
         calls.append(cmd)
         class Result:
             returncode = 0
@@ -951,16 +990,61 @@ def test_run_device_uses_default_duration(monkeypatch, tmp_path):
     monkeypatch.setattr(run_cli.subprocess, "run", _run)
 
     assert run_cli.run_device(package) == 0
+    assert calls[0][1] == str(script)
     assert "--duration" in calls[0] and "15.0" in calls[0]
     assert "--timeout" not in calls[0]
+
+
+def test_run_device_auto_selects_xr_for_xr_only_manifest(monkeypatch, tmp_path):
+    package = tmp_path / "pkg"
+    _write_device_package_manifest(package, supported_modes=["xr"])
+    script = tmp_path / "run_xr_pipeline.py"
+    script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(run_cli, "_xr_runner_script", lambda: script)
+
+    def _run(cmd, **_kwargs):
+        calls.append(cmd)
+
+        class Result:
+            returncode = 0
+
+        return Result()
+
+    monkeypatch.setattr(run_cli.subprocess, "run", _run)
+
+    assert run_cli.run_device(package) == 0
+    assert calls[0][1] == str(script)
+
+
+def test_run_device_auto_prefers_spatial_when_both_modes_are_supported(monkeypatch, tmp_path):
+    package = tmp_path / "pkg"
+    _write_device_package_manifest(package, supported_modes=["xr", "spatial"])
+    script = tmp_path / "run_spatial_pipeline.py"
+    script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(run_cli, "_spatial_runner_script", lambda: script)
+
+    def _run(cmd, **_kwargs):
+        calls.append(cmd)
+
+        class Result:
+            returncode = 0
+
+        return Result()
+
+    monkeypatch.setattr(run_cli.subprocess, "run", _run)
+
+    assert run_cli.run_device(package) == 0
+    assert calls[0][1] == str(script)
 
 
 def test_run_device_json_captures_runner_output(monkeypatch, capsys, tmp_path):
     package = tmp_path / "pkg"
     _write_device_package_manifest(package)
-    script = tmp_path / "run_xr_pipeline.py"
+    script = tmp_path / "run_spatial_pipeline.py"
     script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-    monkeypatch.setattr(run_cli, "_xr_runner_script", lambda: script)
+    monkeypatch.setattr(run_cli, "_spatial_runner_script", lambda: script)
 
     def _run(cmd, **_kwargs):
         class Result:
@@ -977,9 +1061,18 @@ def test_run_device_json_captures_runner_output(monkeypatch, capsys, tmp_path):
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["command"] == "run.device"
+    assert payload["mode"] == "spatial"
     assert payload["target"] == str(package)
     assert payload["stdout"] == "runner stdout"
     assert payload["stderr"] == "runner stderr"
+
+
+def test_run_device_spatial_requires_spatial_supported_mode(tmp_path):
+    package = tmp_path / "pkg"
+    _write_device_package_manifest(package, supported_modes=["xr"])
+
+    with pytest.raises(run_cli.RunCliError, match="does not include 'spatial'"):
+        run_cli.run_device(package, mode="spatial")
 
 
 def test_xr_runner_parse_status_ignores_empty_and_invalid_json():
@@ -1057,6 +1150,101 @@ def test_xr_runner_override_model_backend_patches_staged_package(tmp_path):
     assert spec["operators"][0]["model_target"] == "gpu"
     assert spec["operators"][0]["model"]["model_target"] == "gpu"
     assert "model_target" not in spec["operators"][1]
+
+
+def test_spatial_runner_compat_fields_are_staged_without_mutating_source(tmp_path):
+    package = tmp_path / "pkg"
+    pipeline_dir = package / "pipeline"
+    pipeline_dir.mkdir(parents=True)
+    _write_json(
+        package / "manifest.json",
+        {
+            "schema_version": "2",
+            "id": "demo",
+            "pipelines": [{"id": "main", "path": "pipeline/main.json"}],
+            "runtime": {"supported_modes": ["spatial"]},
+        },
+    )
+    _write_json(
+        pipeline_dir / "main.json",
+        {
+            "operators": [
+                {
+                    "type": "XR_SECURE_MR_OPERATOR_TYPE_RUN_MODEL_INFERENCE_PICO",
+                    "model": {
+                        "bin_path": "model/main.tflite",
+                        "model_name": "main",
+                        "model_type": "tflite",
+                    },
+                }
+            ]
+        },
+    )
+    original_manifest = json.loads((package / "manifest.json").read_text(encoding="utf-8"))
+
+    result = device_runner_base.add_spatial_runner_compat_fields(package, tmp_path / "stage")
+
+    staged_manifest = json.loads((result / "manifest.json").read_text(encoding="utf-8"))
+    assert result != package
+    assert json.loads((package / "manifest.json").read_text(encoding="utf-8")) == original_manifest
+    assert staged_manifest["package_type"] == "spatial_pipeline"
+    assert staged_manifest["format_version"] == 1
+    assert staged_manifest["model"] == {"bin_path": "model/main.tflite", "model_name": "main"}
+
+
+def test_device_runner_collects_gltf_output_metadata(tmp_path):
+    package = tmp_path / "pkg"
+    pipeline_dir = package / "pipeline"
+    gltf_dir = package / "gltf"
+    pipeline_dir.mkdir(parents=True)
+    gltf_dir.mkdir()
+    (gltf_dir / "frame.gltf").write_text("{}", encoding="utf-8")
+    _write_json(
+        package / "manifest.json",
+        {
+            "id": "demo",
+            "pipelines": [{"id": "display", "path": "pipeline/display.json"}],
+        },
+    )
+    _write_json(
+        pipeline_dir / "display.json",
+        {
+            "tensors": {
+                "frame_pose": {"dimensions": [4, 4], "channels": 1, "data_type": 6},
+                "frame_gltf": {"tensor_type": "gltf", "asset": "gltf/frame.gltf"},
+            },
+            "outputs": ["frame_pose", "frame_gltf"],
+        },
+    )
+
+    assert device_runner_base.collect_asset_output_metadata(package) == [
+        {
+            "pipeline": "display",
+            "tensor": "frame_gltf",
+            "kind": "asset",
+            "is_output": True,
+            "written": False,
+            "reason": "asset_reference",
+            "asset": "gltf/frame.gltf",
+            "exists": True,
+        }
+    ]
+
+
+def test_device_runner_stops_xr_and_spatial_apps(monkeypatch):
+    commands = []
+
+    def _run(cmd, **_kwargs):
+        commands.append(cmd)
+
+    monkeypatch.setattr(device_runner_base, "run", _run)
+
+    device_runner_base.stop_runner_apps(["adb"])
+
+    assert commands == [
+        ["adb", "shell", "am", "force-stop", device_runner_base.XR_CONFIG.package_name],
+        ["adb", "shell", "am", "force-stop", device_runner_base.SPATIAL_CONFIG.package_name],
+    ]
 
 
 def test_xr_runner_parse_input_args_supports_bare_and_named(tmp_path):
@@ -1148,6 +1336,68 @@ def test_xr_runner_device_summary_prints_runtime_modes(monkeypatch, capsys, tmp_
     assert "Total time: 42 ms" in captured.out
     assert "Submit time:" not in captured.out
     assert "Pipeline time:" not in captured.out
+
+
+def test_device_runner_summary_prints_asset_references_without_dump_section(monkeypatch, capsys, tmp_path):
+    output_root = tmp_path / "outputs"
+    display_dir = output_root / "display"
+    dump_dir = display_dir / "all_tensors"
+    dump_dir.mkdir(parents=True)
+    (display_dir / "display_frame_pose_1.bin").write_bytes(np.eye(4, dtype=np.float32).tobytes())
+    (dump_dir / "display_post_det_1.bin").write_bytes(np.zeros((1, 21), dtype=np.float32).tobytes())
+    (output_root / "status.json").write_text(
+        json.dumps(
+            {
+                "runtime_modes": ["spatial"],
+                "pipelines": ["display"],
+                "outputs_metadata": [
+                    {
+                        "file": "display_frame_pose_1.bin",
+                        "pipeline": "display",
+                        "tensor": "frame_pose",
+                        "dtype": "float32",
+                        "data_type": 6,
+                        "channels": 1,
+                        "bytes": 64,
+                        "is_output": True,
+                        "shape": [4, 4],
+                    },
+                    {
+                        "pipeline": "display",
+                        "tensor": "frame_gltf",
+                        "kind": "asset",
+                        "asset": "gltf/frame.gltf",
+                        "is_output": True,
+                        "written": False,
+                        "reason": "asset_reference",
+                        "exists": True,
+                    },
+                    {
+                        "file": "display_post_det_1.bin",
+                        "pipeline": "display",
+                        "tensor": "post_det",
+                        "dtype": "float32",
+                        "data_type": 6,
+                        "channels": 1,
+                        "bytes": 84,
+                        "is_output": False,
+                        "shape": [1, 21],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(device_runner_base, "collect_relevant_logs", lambda _config, _adb: [])
+
+    device_runner_base.print_device_summary(device_runner_base.SPATIAL_CONFIG, ["adb"], output_root)
+
+    captured = capsys.readouterr()
+    assert "Outputs: 2" in captured.out
+    assert "display_frame_pose_1.bin: 64 bytes shape=(4, 4) dtype=float32" in captured.out
+    assert "frame_gltf: asset reference gltf/frame.gltf exists=yes" in captured.out
+    assert "Dumped tensors:" not in captured.out
+    assert "display_post_det_1.bin" not in captured.out
 
 
 def test_xr_runner_wait_for_outputs_prints_logs_on_timeout(monkeypatch, capsys):

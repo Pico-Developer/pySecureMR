@@ -315,6 +315,12 @@ def _add_run_parser(subparsers: argparse._SubParsersAction) -> None:
     run_host.add_argument("--input", action="append", default=[], help="Input tensor in name=path format. Repeatable.")
     run_host.add_argument("--dump", action="append", default=[], help="Tensor name to dump, or 'all'. Repeatable.")
     run_host.add_argument("--output-dir", type=Path, help="Directory for .npy output tensors.")
+    run_host.add_argument(
+        "--duration",
+        type=float,
+        default=15.0,
+        help="Accepted for parity with device runs; host execution currently runs one pass.",
+    )
     _add_json_output_argument(run_host)
     run_host.set_defaults(func=_run_host)
 
@@ -1034,6 +1040,7 @@ def _run_host(args: argparse.Namespace) -> int:
                 inputs=args.input,
                 output_dir=args.output_dir,
                 dumps=args.dump,
+                duration=args.duration,
             )
         _print_json(
             {
@@ -1043,6 +1050,7 @@ def _run_host(args: argparse.Namespace) -> int:
                 "pipelines": list(args.pipeline),
                 "output_dir": str(args.output_dir) if args.output_dir else None,
                 "dumps": list(args.dump),
+                "duration": args.duration,
                 "stdout": stdout.getvalue(),
             }
         )
@@ -1053,6 +1061,7 @@ def _run_host(args: argparse.Namespace) -> int:
         inputs=args.input,
         output_dir=args.output_dir,
         dumps=args.dump,
+        duration=args.duration,
     )
 
 

@@ -288,6 +288,34 @@ class TestConverter:
         op_spec = spec["operators"][0]
         assert op_spec["expression"] == "{0} / 255.0 * 2.0 - 1.0"
 
+    def test_convert_spatial_only_ops_use_sdk_json_fields(self):
+        """Test that Spatial-only operators emit fields accepted by the SDK loader."""
+        @trace(inputs=["scene"], outputs=["visible", "component"])
+        def func(scene):
+            return (
+                ops.scenegraph_visibility(scene, visible=False),
+                ops.update_component(scene, update_type="true"),
+            )
+
+        _, ctx = func.trace(scene=np.array([[1]], dtype=np.uint8))
+        spec = trace_to_pipeline_spec(ctx)
+
+        assert spec["operators"][0] == {
+            "type": "scenegraph_visibility",
+            "inputs": ["scene"],
+            "outputs": [],
+            "scenegraph": "scene",
+            "visible": False,
+        }
+        assert spec["operators"][1] == {
+            "type": "update_component",
+            "inputs": ["scene"],
+            "outputs": [],
+            "scenegraph": "scene",
+            "enabled": True,
+        }
+        assert spec["outputs"] == []
+
 
 class TestVerifier:
     """Tests for the verifier module."""

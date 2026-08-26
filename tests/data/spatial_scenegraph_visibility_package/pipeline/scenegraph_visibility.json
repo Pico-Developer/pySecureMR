@@ -1,0 +1,27 @@
+{
+  "metadata": {
+    "version": 1
+  },
+  "tensors": {
+    "frame_gltf": {
+      "tensor_type": "gltf",
+      "asset": "gltf/frame.gltf",
+      "is_placeholder": true
+    }
+  },
+  "operators": [
+    {
+      "type": "scenegraph_visibility",
+      "scenegraph": "frame_gltf",
+      "visible": true,
+      "inputs": [
+        "frame_gltf"
+      ],
+      "outputs": []
+    }
+  ],
+  "inputs": [],
+  "outputs": [
+    "frame_gltf"
+  ]
+}

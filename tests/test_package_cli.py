@@ -1,5 +1,6 @@
 import json
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -166,6 +167,17 @@ def test_create_package_infers_spatial_mode_from_spatial_only_operator(tmp_path)
     )
 
     assert _read_json(output / "manifest.json")["runtime"]["supported_modes"] == ["spatial"]
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    [
+        "spatial_scenegraph_visibility_package",
+        "spatial_update_component_package",
+    ],
+)
+def test_spatial_only_fixture_packages_validate(fixture):
+    assert package_cli.validate_package(Path("tests/data") / fixture) == 0
 
 
 def test_create_package_errors_for_missing_asset(tmp_path):
