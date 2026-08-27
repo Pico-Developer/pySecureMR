@@ -324,8 +324,13 @@ def _add_run_parser(subparsers: argparse._SubParsersAction) -> None:
     _add_json_output_argument(run_host)
     run_host.set_defaults(func=_run_host)
 
-    run_device = run_subparsers.add_parser("device", help="Run a package on a device through the XR runner APK.")
+    run_device = run_subparsers.add_parser("device", help="Run a package on a device through a runner APK.")
     run_device.add_argument("target", type=Path, help="Package directory or package zip.")
+    run_device.add_argument(
+        "--mode",
+        choices=["xr", "spatial"],
+        help="Runner mode. Defaults to manifest runtime.supported_modes, preferring spatial.",
+    )
     run_device.add_argument(
         "--input",
         action="append",
@@ -1070,6 +1075,7 @@ def _run_device(args: argparse.Namespace) -> int:
     run_cli = _domain_module("run_cli")
     return run_cli.run_device(
         args.target,
+        mode=args.mode,
         inputs=args.input,
         pipeline_ids=args.pipeline,
         output_dir=args.output_dir,

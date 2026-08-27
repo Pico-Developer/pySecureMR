@@ -1886,6 +1886,8 @@ def test_run_device_command_forwards_options(monkeypatch, tmp_path):
             "run",
             "device",
             str(package),
+            "--mode",
+            "xr",
             "--input",
             str(image),
             "--input",
@@ -1916,6 +1918,7 @@ def test_run_device_command_forwards_options(monkeypatch, tmp_path):
 
     args, kwargs = calls[0]
     assert args == (package,)
+    assert kwargs["mode"] == "xr"
     assert kwargs["inputs"] == [str(image), f"vst_right_image={image}"]
     assert kwargs["pipeline_ids"] == ["detection", "display"]
     assert kwargs["output_dir"] == output_dir

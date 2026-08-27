@@ -76,6 +76,16 @@ pyspatialml = [
   "xr_pipeline_runner/**/*.py",
   "xr_pipeline_runner/gradlew",
   "xr_pipeline_runner/gradlew.bat",
+  "spatial_pipeline_runner/*.kts",
+  "spatial_pipeline_runner/*.properties",
+  "spatial_pipeline_runner/app/*.kts",
+  "spatial_pipeline_runner/app/src/**/*.kt",
+  "spatial_pipeline_runner/app/src/**/*.xml",
+  "spatial_pipeline_runner/gradle/wrapper/*.jar",
+  "spatial_pipeline_runner/gradle/wrapper/*.properties",
+  "spatial_pipeline_runner/scripts/*.py",
+  "spatial_pipeline_runner/gradlew",
+  "spatial_pipeline_runner/gradlew.bat",
 ]
 
 [tool.setuptools.dynamic]

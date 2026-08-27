@@ -1,3 +1,16 @@
 include LICENSE
 include License.md
 include pyspatialml/apks/pyspatialml_xr_runner-debug.apk
+include pyspatialml/apks/pyspatialml_spatial_runner-debug.apk
+include pyspatialml/spatial_pipeline_runner/build.gradle.kts
+include pyspatialml/spatial_pipeline_runner/gradle.properties
+include pyspatialml/spatial_pipeline_runner/gradlew
+include pyspatialml/spatial_pipeline_runner/gradlew.bat
+include pyspatialml/spatial_pipeline_runner/settings.gradle.kts
+include pyspatialml/spatial_pipeline_runner/app/build.gradle.kts
+recursive-include pyspatialml/spatial_pipeline_runner/app/src *.kt *.xml
+recursive-include pyspatialml/spatial_pipeline_runner/gradle/wrapper *.jar *.properties
+recursive-include pyspatialml/spatial_pipeline_runner/scripts *.py
+prune pyspatialml/spatial_pipeline_runner/.gradle
+prune pyspatialml/spatial_pipeline_runner/.kotlin
+prune pyspatialml/spatial_pipeline_runner/app/build
