@@ -15,7 +15,6 @@ import com.pico.spatial.ml.readback.readbackContentSuspend
 import com.pico.spatial.ml.securemr.GlobalTensor
 import com.pico.spatial.ml.securemr.Pipeline
 import com.pico.spatial.ml.securemr.PipelinePackageBundle
-import com.pico.spatial.ml.securemr.SpatialMLException
 import com.pico.spatial.ml.securemr.SpatialMLInstance
 import com.pico.spatial.ml.securemr.SpatialMLSession
 import com.pico.spatial.ml.securemr.loadPipelinePackageFromAssets
@@ -116,7 +115,10 @@ private class SpatialRunner(private val context: Context) {
         val tensorSpecs = readTensorSpecs(manifest)
         val pipelineOrder = pipelineOrder(manifest, bundle)
         bindInputs(bundle, tensorSpecs)
-        Log.i(TAG, "loaded package=${packageDir.absolutePath} pipelines=${pipelineOrder.joinToString()}")
+        Log.i(
+            TAG,
+            "loaded package=${packageDir.absolutePath} pipelines=${pipelineOrder.joinToString()}",
+        )
 
         var iteration = 0
         do {
@@ -140,7 +142,9 @@ private class SpatialRunner(private val context: Context) {
             )
             Log.i(TAG, "iteration $iteration submitted")
             delay(READBACK_SETTLE_MS)
-            readOutputs(bundle, tensorSpecs, pipelineOrder, iteration, startedAt)
+            if (!readOutputs(bundle, tensorSpecs, pipelineOrder, iteration, startedAt)) {
+                return
+            }
             if (loop) {
                 delay(intervalMs.toLong())
             }
@@ -211,9 +215,11 @@ private class SpatialRunner(private val context: Context) {
         pipelineOrder: List<String>,
         iteration: Int,
         startedAt: Long,
-    ) {
+    ): Boolean {
         val metadata = JSONArray()
-        var written = 0
+        val failedOutputs = JSONArray()
+        var outputsExpected = 0
+        var outputsWritten = 0
         for (pipelineId in pipelineOrder) {
             val pipeline = bundle.pipelines[pipelineId] ?: continue
             val targetNames = linkedSetOf<String>()
@@ -227,11 +233,39 @@ private class SpatialRunner(private val context: Context) {
                 bundle.detectionTensor?.let { targetNames += it }
             }
             for (tensorName in targetNames) {
-                val tensor = bundle.globalTensors[tensorName] ?: continue
-                val spec = tensorSpecs[tensorName] ?: continue
-                if (spec.isAssetReference()) continue
                 val isOutput = pipeline.outputs.contains(tensorName)
-                val bytes = readTensorBytes(tensor) ?: continue
+                val tensor = bundle.globalTensors[tensorName]
+                val spec = tensorSpecs[tensorName]
+                if (isOutput && spec?.isAssetReference() != true) outputsExpected += 1
+                if (tensor == null || spec == null) {
+                    if (isOutput && spec?.isAssetReference() != true) {
+                        failedOutputs.put(
+                            JSONObject()
+                                .put("pipeline", pipelineId)
+                                .put("tensor", tensorName)
+                                .put("error", "required output tensor was not materialized")
+                        )
+                    }
+                    continue
+                }
+                if (spec.isAssetReference()) continue
+                val bytes = try {
+                    readTensorBytes(tensor)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    if (isOutput) {
+                        failedOutputs.put(
+                            JSONObject()
+                                .put("pipeline", pipelineId)
+                                .put("tensor", tensorName)
+                                .put("error", error.message ?: error.javaClass.name)
+                        )
+                    } else {
+                        Log.w(TAG, "optional readback skipped pipeline=$pipelineId tensor=$tensorName", error)
+                    }
+                    continue
+                }
                 val filename = "${safeName(pipelineId)}_${safeName(tensorName)}_$iteration.bin"
                 withContext(Dispatchers.IO) {
                     File(outputDir, filename).writeBytes(bytes)
@@ -248,14 +282,15 @@ private class SpatialRunner(private val context: Context) {
                         .put("is_output", isOutput)
                         .put("shape", JSONArray(spec.dimensions.toList()))
                 )
-                written += 1
+                if (isOutput) outputsWritten += 1
                 Log.i(TAG, "wrote readback $filename bytes=${bytes.size}")
             }
         }
+        val complete = failedOutputs.length() == 0
         writeStatus(
             outputDir,
             JSONObject()
-                .put("state", "complete")
+                .put("state", if (complete) "complete" else "error")
                 .put("mode", "spatial")
                 .put("iteration", iteration)
                 .put("loop", loop)
@@ -263,13 +298,18 @@ private class SpatialRunner(private val context: Context) {
                 .put("total_elapsed_ms", SystemClock.elapsedRealtime() - startedAt)
                 .put("runtime_modes", JSONArray(listOf("spatial")))
                 .put("pipelines", JSONArray(pipelineOrder))
-                .put("outputs_expected", written)
-                .put("outputs_written", written)
+                .put("outputs_expected", outputsExpected)
+                .put("outputs_written", outputsWritten)
+                .put("failed_outputs", failedOutputs)
                 .put("outputs_metadata", metadata)
         )
+        if (!complete) {
+            Log.e(TAG, "required output readback failed expected=$outputsExpected written=$outputsWritten failures=$failedOutputs")
+        }
+        return complete
     }
 
-    private suspend fun readTensorBytes(tensor: GlobalTensor): ByteArray? =
+    private suspend fun readTensorBytes(tensor: GlobalTensor): ByteArray =
         try {
             tensor.readbackContentSuspend().use { content ->
                 val duplicate = content.buffer.duplicate()
@@ -278,9 +318,11 @@ private class SpatialRunner(private val context: Context) {
                 duplicate.get(bytes)
                 bytes
             }
-        } catch (error: SpatialMLException) {
-            Log.w(TAG, "readback skipped ${error.message}")
-            null
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            Log.w(TAG, "readback failed ${error.message}", error)
+            throw error
         }
 
     private fun readTensorSpecs(manifest: JSONObject): Map<String, TensorSpec> {
@@ -440,6 +482,7 @@ private class SpatialRunner(private val context: Context) {
 
         private fun safeName(value: String): String = value.replace(Regex("[^A-Za-z0-9_.-]"), "_")
     }
+
 }
 
 private fun writeStatus(outputDir: File, status: JSONObject) {

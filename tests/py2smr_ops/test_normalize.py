@@ -41,6 +41,22 @@ class TestNormalizeOp:
         expected = np.array([[0.6, 0.8]], dtype=np.float32)
         np.testing.assert_allclose(result, expected, rtol=1e-5)
 
+    def test_normalize_serializes_default_mode(self):
+        @trace(inputs=["x"], outputs=["y"])
+        def normalize_vec(x):
+            return ops.normalize(x)
+
+        _, ctx = normalize_vec.trace(x=np.array([[3.0, 4.0]], dtype=np.float32))
+        spec = convert(ctx)
+
+        assert spec["operators"][0]["normalize_type"] == "L2"
+
+    def test_normalize_accepts_named_modes(self):
+        value = np.array([[1.0, -2.0]], dtype=np.float32)
+        np.testing.assert_allclose(ops.normalize(value, normalize_type="L1"), value / 3.0)
+        np.testing.assert_allclose(ops.normalize(value, normalize_type="INF"), value / 2.0)
+        np.testing.assert_allclose(ops.normalize(value, normalize_type="MINMAX"), [[1.0, 0.0]])
+
     def test_normalize_multiple_rows(self):
         """Test normalization with multiple rows."""
         @trace(inputs=["x"], outputs=["y"])

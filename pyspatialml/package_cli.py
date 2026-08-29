@@ -16,9 +16,11 @@
 
 from __future__ import annotations
 
+import atexit
 import json
 import shutil
 import sys
+import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -73,6 +75,13 @@ _XR_ONLY_OPERATORS = {
 _SPATIAL_ONLY_OPERATORS = {
     "SCENEGRAPH_VISIBILITY",
     "UPDATE_COMPONENT",
+}
+_CUSTOM_HANDLER_ONLY_OPERATORS = {
+    "CAMERA_SPACE_TO_WORLD",
+    "LOAD_TEXTURE",
+    "SWITCH_GLTF_RENDER_STATUS",
+    "UPDATE_GLTF",
+    "RENDER_TEXT",
 }
 
 
@@ -297,6 +306,9 @@ def validate_package(path: Path) -> int:
     manifest = _load_validated_manifest(root)
     _validate_package_root(root, manifest)
     print(f"Package is valid: {path}")
+    requirements = _package_runtime_requirements(root, manifest)
+    for requirement in requirements:
+        print(f"Package runtime requirement: {requirement}")
     return 0
 
 
@@ -349,7 +361,44 @@ def inspect_package(path: Path) -> int:
         print("Assets:")
         for asset in assets:
             print(f"  {asset}")
+    requirements = _package_runtime_requirements(root, manifest)
+    if requirements:
+        print("Runtime requirements:")
+        for requirement in requirements:
+            print(f"  {requirement}")
     return 0
+
+
+def _package_runtime_requirements(root: Path, manifest: Mapping[str, Any]) -> list[str]:
+    """Report runtime features that package JSON alone cannot provide.
+
+    This deliberately does not alter the package spec. It makes the known
+    SpatialSDK integration boundary visible to package users instead of
+    presenting a structurally valid package as universally runnable.
+    """
+    pipeline_specs: list[tuple[str, Mapping[str, Any]]] = []
+    _collect_package_pipeline_specs(root, manifest, pipeline_specs)
+    requirements: set[str] = set()
+    for _, spec in pipeline_specs:
+        if _has_gltf_asset_tensor(spec):
+            requirements.add("GLTF tensor asset materialization in the downstream runtime")
+        for op_type in _pipeline_operator_type_names(spec):
+            if op_type in _CUSTOM_HANDLER_ONLY_OPERATORS:
+                requirements.add(f"downstream custom operator handler for {op_type.lower()}")
+    return sorted(requirements)
+
+
+def _has_gltf_asset_tensor(spec: Mapping[str, Any]) -> bool:
+    tensors = spec.get("tensors", {})
+    if not isinstance(tensors, Mapping):
+        return False
+    return any(
+        isinstance(tensor, Mapping)
+        and str(tensor.get("tensor_type") or tensor.get("type") or "").lower() == "gltf"
+        and isinstance(tensor.get("asset"), str)
+        and bool(tensor.get("asset"))
+        for tensor in tensors.values()
+    )
 
 
 def print_package_error(exc: Exception) -> None:
@@ -411,7 +460,12 @@ def _normalize_pipeline_assets(
                 model["bin_path"] = package_path
                 # Current XR deserializers still read these fields at operator
                 # level even though model metadata is also nested under model.
-                op["model_type"] = "tflite"
+                model.setdefault("model_type", "tflite")
+                model.setdefault("model_target", op.get("model_target", "npu"))
+                model.setdefault("cpu_target_num_threads", op.get("cpu_target_num_threads", 1))
+                for key in ("model_name", "model_type", "model_target", "cpu_target_num_threads"):
+                    if key in model:
+                        op[key] = model[key]
                 op.pop("model_file", None)
                 op.pop("model_asset", None)
                 op.pop("model_id", None)
@@ -683,9 +737,11 @@ def _materialize_package(path: Path) -> Path:
     if path.is_dir():
         return path
     if path.is_file() and path.suffix == ".zip":
-        extract_root = path.with_suffix("")
-        if extract_root.exists():
-            shutil.rmtree(extract_root)
+        # Validation and inspection are read-only operations.  Never use the
+        # archive stem as an extraction directory: an unrelated directory
+        # with that name may already exist beside the archive.
+        extract_root = Path(tempfile.mkdtemp(prefix="pyspatialml-package-"))
+        atexit.register(shutil.rmtree, extract_root, True)
         with zipfile.ZipFile(path) as archive:
             try:
                 safe_extract_zip(archive, extract_root)

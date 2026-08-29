@@ -39,7 +39,53 @@ class TestAssignment:
         )
 
         assert verification.success, verification.error_message
+
         np.testing.assert_allclose(result, src, rtol=1e-5)
+
+    def test_rank_three_tensor_backed_slices_and_steps(self):
+        from securemr.py2smr.verifier import run_pipeline_python
+
+        spec = {
+            "tensors": {},
+            "operators": [{
+                "type": "assignment",
+                "inputs": ["src", "dst"],
+                "outputs": ["out"],
+                "src_slices_tensor": "src_desc",
+                "dst_slices_tensor": "dst_desc",
+            }],
+            "inputs": ["src", "dst", "src_desc", "dst_desc"],
+            "outputs": ["out"],
+        }
+        src = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+        dst = np.zeros_like(src)
+        src_desc = np.array([[0, 2, 1], [0, 3, 2], [0, 4, 2]], dtype=np.int32)
+        dst_desc = np.array([[0, 2, 1], [0, 3, 2], [0, 4, 2]], dtype=np.int32)
+        output = run_pipeline_python(
+            spec, {"src": src, "dst": dst, "src_desc": src_desc, "dst_desc": dst_desc},
+        )["out"]
+        expected = np.zeros_like(src)
+        expected[:, ::2, ::2] = src[:, ::2, ::2]
+        np.testing.assert_array_equal(output, expected)
+
+    def test_channel_slices_are_applied_to_last_dimension(self):
+        from securemr.py2smr.verifier import run_pipeline_python
+
+        spec = {
+            "tensors": {},
+            "operators": [{
+                "type": "assignment", "inputs": ["src", "dst"], "outputs": ["out"],
+                "src_channel_slice": [0, 3, 2], "dst_channel_slice": [1, 4, 2],
+            }],
+            "inputs": ["src", "dst"], "outputs": ["out"],
+        }
+        src = np.arange(12, dtype=np.float32).reshape(2, 2, 3)
+        dst = np.zeros((2, 2, 4), dtype=np.float32)
+        output = run_pipeline_python(spec, {"src": src, "dst": dst})["out"]
+        expected = np.zeros_like(dst)
+        expected[..., 1] = src[..., 0]
+        expected[..., 3] = src[..., 2]
+        np.testing.assert_array_equal(output, expected)
 
     def test_schema_v2_slice_references_host(self):
         """Test schema-v2 tensor slice references in assignment inputs/outputs."""
@@ -47,9 +93,9 @@ class TestAssignment:
 
         spec = {
             "tensors": {
-                "src": {"dimensions": [4, 1], "channels": 1, "data_type": 6, "is_placeholder": True, "usage": 6},
-                "dst": {"dimensions": [4, 1], "channels": 1, "data_type": 6, "is_placeholder": True, "usage": 6},
-                "out": {"dimensions": [4, 1], "channels": 1, "data_type": 6, "is_placeholder": True, "usage": 6},
+                "src": {"dimensions": [1, 4], "channels": 1, "data_type": 6, "is_placeholder": True, "usage": 6},
+                "dst": {"dimensions": [1, 4], "channels": 1, "data_type": 6, "is_placeholder": True, "usage": 6},
+                "out": {"dimensions": [1, 4], "channels": 1, "data_type": 6, "is_placeholder": True, "usage": 6},
             },
             "operators": [
                 {"type": "assignment", "inputs": ["src[0:1,1:2]"], "outputs": ["dst[0:1,2:3]"]},

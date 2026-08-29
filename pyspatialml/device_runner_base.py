@@ -117,7 +117,7 @@ def main(config: RunnerConfig, argv: list[str] | None = None) -> int:
         package_dir = strip_unused_gltf_outputs(package_dir, tmp_root)
         package_dir = override_model_backend(package_dir, args.backend, tmp_root)
         if config.mode == "spatial":
-            package_dir = add_spatial_runner_compat_fields(package_dir, tmp_root)
+            validate_spatial_runner_scene_ops(package_dir)
         package_zip = make_runner_package_zip(package_dir, tmp_root)
         adb = adb_prefix(args.device)
 
@@ -419,74 +419,52 @@ def override_model_backend(package_dir: Path, backend: str | None, tmp_root: Pat
     return package_dir
 
 
-def add_spatial_runner_compat_fields(package_dir: Path, tmp_root: Path) -> Path:
+def normalize_operator_type(op_type: str) -> str:
+    normalized = op_type.strip().lower()
+    if normalized in {
+        "scenegraph_visibility",
+        "xr_secure_mr_operator_type_scenegraph_visibility_pico",
+    }:
+        return "scenegraph_visibility"
+    if normalized in {
+        "update_component",
+        "xr_secure_mr_operator_type_update_component_pico",
+    }:
+        return "update_component"
+    return normalized
+
+
+def validate_spatial_runner_scene_ops(package_dir: Path) -> None:
+    """Validate scene operations before staging them for the Spatial runner."""
     manifest_path = package_dir / "manifest.json"
     with open(manifest_path, "r", encoding="utf-8") as file:
         manifest = json.load(file)
-    if not isinstance(manifest, dict):
-        return package_dir
-
-    changed = False
-    if manifest.get("package_type") != "spatial_pipeline":
-        manifest["package_type"] = "spatial_pipeline"
-        changed = True
-    if "format_version" not in manifest:
-        manifest["format_version"] = 1
-        changed = True
-    if not isinstance(manifest.get("model"), dict):
-        model = single_inline_model_spec(package_dir, manifest)
-        if model is not None:
-            manifest["model"] = model
-            changed = True
-
-    if not changed:
-        return package_dir
-    package_dir = ensure_mutable_package(package_dir, tmp_root)
-    with open(package_dir / "manifest.json", "w", encoding="utf-8") as file:
-        json.dump(manifest, file, indent=2)
-        file.write("\n")
-    return package_dir
-
-
-def single_inline_model_spec(package_dir: Path, manifest: dict) -> dict | None:
-    models: dict[tuple[str, str, str | None], dict] = {}
     pipelines = manifest.get("pipelines")
     if not isinstance(pipelines, list):
-        return None
+        return
     for item in pipelines:
         if not isinstance(item, dict) or not item.get("path"):
             continue
+        pipeline_id = str(item.get("id") or "<unknown>")
         pipeline_path = safe_package_path(package_dir, str(item["path"]))
         if pipeline_path is None or not pipeline_path.is_file():
             continue
         with open(pipeline_path, "r", encoding="utf-8") as file:
             spec = json.load(file)
-        operators = spec.get("operators")
-        if not isinstance(operators, list):
-            continue
-        for op in operators:
-            if not isinstance(op, dict) or not is_model_operator(op):
+        for index, op in enumerate(spec.get("operators", [])):
+            if not isinstance(op, dict):
                 continue
-            model = op.get("model")
-            if not isinstance(model, dict) or not model.get("bin_path"):
+            if normalize_operator_type(str(op.get("type") or "")) != "update_component":
                 continue
-            legacy_model = {
-                "bin_path": str(model["bin_path"]),
-                "model_name": str(model.get("model_name") or op.get("model_name") or "main"),
-            }
-            if model.get("json_path"):
-                legacy_model["json_path"] = str(model["json_path"])
-            if model.get("extra_json_path"):
-                legacy_model["extra_json_path"] = str(model["extra_json_path"])
-            key = (
-                legacy_model["bin_path"],
-                legacy_model["model_name"],
-                legacy_model.get("json_path"),
-            )
-            models.setdefault(key, legacy_model)
-    if len(models) == 1:
-        return next(iter(models.values()))
-    return None
+            scenegraph = op.get("scenegraph") or (op.get("inputs") or [None])[0]
+            data = op.get("data") or (op.get("inputs") or [None, None])[1]
+            entity_path = op.get("entity_path") or op.get("entityPath")
+            property_name = op.get("property") or op.get("target_property")
+            if not scenegraph or not data or not entity_path or not property_name:
+                raise SystemExit(
+                    f"Invalid update_component at {pipeline_id}[{index}]: requires "
+                    "scenegraph, data, entity_path, and property"
+                )
 
 
 def override_pipeline_model_backend(spec: dict, backend: str) -> int:
@@ -559,12 +537,12 @@ def stage_inputs(config: RunnerConfig, adb: list[str], input_args: list[str]) ->
         raise SystemExit("Only one bare --input path is supported; use tensor=path for explicit inputs.")
 
     if named_inputs:
+        remote_names = named_input_remote_names(named_inputs)
         run(adb + ["shell", "rm", "-rf", config.staging_input])
         run(adb + ["shell", "mkdir", "-p", config.staging_input])
         run_as(config, adb, "rm -rf files/input && mkdir -p files/input")
-        for tensor_name, input_path in named_inputs:
+        for (tensor_name, input_path), remote_name in zip(named_inputs, remote_names):
             suffix = input_path.suffix or ".bin"
-            remote_name = f"{safe_input_filename(tensor_name)}{suffix}"
             staging_input_file = f"{config.staging_input}/{remote_name}"
             run(adb + ["push", str(input_path), staging_input_file])
             run_as(config, adb, f"cp {staging_input_file} files/input/{shlex.quote(remote_name)}")
@@ -612,6 +590,24 @@ def parse_input_args(input_args: list[str]) -> tuple[list[Path], list[tuple[str,
 
 def safe_input_filename(tensor_name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", tensor_name)
+
+
+def named_input_remote_names(named_inputs: list[tuple[str, Path]]) -> list[str]:
+    remote_names = [
+        f"{safe_input_filename(tensor_name)}{input_path.suffix or '.bin'}"
+        for tensor_name, input_path in named_inputs
+    ]
+    seen: dict[str, str] = {}
+    for (tensor_name, _), remote_name in zip(named_inputs, remote_names):
+        previous_name = seen.get(remote_name)
+        if previous_name is not None:
+            raise SystemExit(
+                f"Named input filenames collide after sanitization: "
+                f"{previous_name!r} and {tensor_name!r} both map to {remote_name!r}. "
+                "Use distinct tensor names."
+            )
+        seen[remote_name] = tensor_name
+    return remote_names
 
 
 def ensure_apk_installed(config: RunnerConfig, adb: list[str], apk: Path) -> None:
@@ -684,9 +680,34 @@ def pull_app_outputs(
     *,
     asset_output_metadata: list[dict] | None = None,
 ) -> Path:
-    if output_dir.exists():
-        shutil.rmtree(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(
+        tempfile.mkdtemp(
+            prefix=f".{output_dir.name}.staging-",
+            dir=output_dir.parent,
+        )
+    )
+    try:
+        return _pull_app_outputs_into(
+            config,
+            adb,
+            staging_dir,
+            asset_output_metadata=asset_output_metadata,
+            output_dir=output_dir,
+        )
+    finally:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
+
+
+def _pull_app_outputs_into(
+    config: RunnerConfig,
+    adb: list[str],
+    staging_dir: Path,
+    *,
+    asset_output_metadata: list[dict] | None,
+    output_dir: Path,
+) -> Path:
 
     listing = run_as_capture(config, adb, "find files/outputs -maxdepth 1 -type f -print", check=False)
     files = [line.strip() for line in listing.splitlines() if line.strip()]
@@ -695,11 +716,11 @@ def pull_app_outputs(
     for remote_path in files:
         filename = Path(remote_path).name
         if filename == "status.json":
-            local_path = output_dir / filename
+            local_path = staging_dir / filename
         else:
             metadata = metadata_by_file.get(filename, {})
             pipeline_id = pipeline_id_for_output(Path(filename), metadata)
-            local_root = output_dir / safe_input_filename(pipeline_id)
+            local_root = staging_dir / safe_input_filename(pipeline_id)
             if metadata and metadata.get("is_output") is False:
                 local_root = local_root / "all_tensors"
             local_root.mkdir(parents=True, exist_ok=True)
@@ -711,11 +732,35 @@ def pull_app_outputs(
             stdout=subprocess.PIPE,
         )
         local_path.write_bytes(result.stdout)
-    if asset_output_metadata:
-        annotate_local_status(output_dir / "status.json", asset_output_metadata)
     if not files:
         raise SystemExit("No output files were produced by the runner APK.")
+    if asset_output_metadata:
+        annotate_local_status(staging_dir / "status.json", asset_output_metadata)
+    _commit_pulled_outputs(staging_dir, output_dir)
     return output_dir
+
+
+def _commit_pulled_outputs(staging_dir: Path, output_dir: Path) -> None:
+    """Atomically publish pulled outputs after every remote read succeeded."""
+    backup_dir: Path | None = None
+    try:
+        if output_dir.exists() or output_dir.is_symlink():
+            backup_dir = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{output_dir.name}.backup-",
+                    dir=output_dir.parent,
+                )
+            )
+            backup_dir.rmdir()
+            output_dir.rename(backup_dir)
+        staging_dir.rename(output_dir)
+    except BaseException:
+        if backup_dir is not None and backup_dir.exists() and not output_dir.exists():
+            backup_dir.rename(output_dir)
+        raise
+    else:
+        if backup_dir is not None:
+            shutil.rmtree(backup_dir, ignore_errors=True)
 
 
 def annotate_local_status(status_path: Path, asset_output_metadata: list[dict]) -> None:

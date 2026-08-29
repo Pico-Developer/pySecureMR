@@ -25,7 +25,7 @@ import tempfile
 import time
 import zipfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
@@ -47,7 +47,6 @@ class PipelineRunTarget:
     id: Optional[str]
     path: Path
     asset_root: Path
-    manifest_model: Optional[Mapping[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -300,8 +299,38 @@ def _validate_manifest_pipeline_files(root: Path, manifest: Mapping[str, Any]) -
         path_value = item.get("path")
         if not isinstance(path_value, str) or not path_value:
             raise RunCliError("Package manifest pipeline entries require a non-empty path")
-        if not (root / path_value).is_file():
+        path = _resolve_manifest_path(root, path_value, label="pipeline")
+        if not path.is_file():
             raise RunCliError(f"Package manifest pipeline file not found: {path_value}. {_PACKAGE_TARGET_HINT}")
+
+
+def _resolve_manifest_path(root: Path, path_value: str, *, label: str) -> Path:
+    """Resolve a manifest-relative path without allowing package escapes."""
+    if not isinstance(path_value, str) or not path_value:
+        raise RunCliError(f"Package manifest {label} entries require a non-empty path")
+
+    normalized = path_value.replace("\\", "/")
+    windows_path = PureWindowsPath(path_value)
+    if (
+        PurePosixPath(normalized).is_absolute()
+        or windows_path.is_absolute()
+        or bool(windows_path.drive)
+    ):
+        raise RunCliError(f"Package manifest {label} path must be package-relative: {path_value}")
+
+    parts = PurePosixPath(normalized).parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise RunCliError(f"Invalid package-relative {label} path: {path_value}")
+
+    resolved_root = root.resolve()
+    resolved_path = (root / PurePosixPath(*parts)).resolve()
+    try:
+        resolved_path.relative_to(resolved_root)
+    except ValueError as exc:
+        raise RunCliError(
+            f"Package {label} path escapes package root: {path_value}"
+        ) from exc
+    return resolved_path
 
 
 def _validate_device_run_args(
@@ -369,7 +398,7 @@ def _run_one_pipeline(
     from securemr.py2smr.verifier import run_pipeline_python
 
     spec = _read_json(run_target.path)
-    spec = _normalize_run_pipeline_spec(spec, manifest_model=run_target.manifest_model)
+    spec = _normalize_run_pipeline_spec(spec)
     if default_input_path is not None:
         spec = _apply_default_image_input(spec, default_input_path, input_values)
     model_runner = _LiteRTModelRunner(asset_root=run_target.asset_root)
@@ -481,7 +510,7 @@ def _resolve_pipeline_targets(target: Path, *, pipeline_ids: Sequence[str]) -> t
 
     run_targets = []
     for selected in selected_items:
-        path = root / selected["path"]
+        path = _resolve_manifest_path(root, selected.get("path"), label="pipeline")
         if not path.is_file():
             raise RunCliError(f"Package pipeline file not found: {selected['path']}")
         run_targets.append(
@@ -489,7 +518,6 @@ def _resolve_pipeline_targets(target: Path, *, pipeline_ids: Sequence[str]) -> t
                 id=selected.get("id"),
                 path=path,
                 asset_root=root,
-                manifest_model=manifest.get("model") if isinstance(manifest.get("model"), Mapping) else None,
             )
         )
     return run_targets, package_context
@@ -590,33 +618,8 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 def _normalize_run_pipeline_spec(
     spec: Mapping[str, Any],
-    *,
-    manifest_model: Optional[Mapping[str, Any]],
 ) -> dict[str, Any]:
     normalized = json.loads(json.dumps(spec))
-    if not manifest_model:
-        _force_host_model_backend_cpu(normalized)
-        return normalized
-    for op in normalized.get("operators", []):
-        if not isinstance(op, dict):
-            continue
-        op_type = str(op.get("type", "")).upper()
-        if "RUN_MODEL_INFERENCE" not in op_type and "RUN_ALGORITHM" not in op_type:
-            continue
-        if op.get("model"):
-            continue
-        bin_path = manifest_model.get("bin_path")
-        if not bin_path:
-            continue
-        op["model"] = {
-            "bin_path": bin_path,
-            "model_name": op.get("model_name") or manifest_model.get("model_name") or "main",
-            "model_type": op.get("model_type") or "tflite",
-            "model_target": op.get("model_target") or manifest_model.get("model_target") or "npu",
-            "cpu_target_num_threads": int(op.get("cpu_target_num_threads") or 1),
-        }
-        # Current XR deserializers still read model fields at operator level.
-        op["model_type"] = "tflite"
     _force_host_model_backend_cpu(normalized)
     return normalized
 
@@ -673,6 +676,10 @@ def _load_run_manifest(root: Path) -> dict[str, Any]:
     manifest = _read_json(manifest_path)
     if "id" not in manifest or "pipelines" not in manifest:
         raise RunCliError("Package manifest requires id and pipelines")
+    if str(manifest.get("schema_version", "")) != "2":
+        raise RunCliError("Package manifest schema_version must be 2")
+    if "model" in manifest or "models" in manifest:
+        raise RunCliError("Package manifest must not contain model/models; v2 stores model metadata inline")
     if not isinstance(manifest["pipelines"], list) or not manifest["pipelines"]:
         raise RunCliError("Package manifest requires a non-empty pipelines list")
     return manifest

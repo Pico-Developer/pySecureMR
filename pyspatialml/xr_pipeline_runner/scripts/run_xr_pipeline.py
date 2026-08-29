@@ -20,6 +20,7 @@ from pyspatialml.zip_utils import ZipSafetyError, safe_extract_zip
 
 
 PACKAGE_NAME = "com.bytedance.pico.pyspatialml.xr_runner"
+SPATIAL_PACKAGE_NAME = "com.bytedance.pico.pyspatialml.spatial_runner"
 COMPONENT = f"{PACKAGE_NAME}/android.app.NativeActivity"
 REMOTE_ROOT = f"/sdcard/Android/data/{PACKAGE_NAME}/files"
 REMOTE_PACKAGE = f"{REMOTE_ROOT}/package"
@@ -64,6 +65,7 @@ def main(argv: list[str] | None = None) -> int:
 
         ensure_apk_installed(adb, apk)
 
+        stop_conflicting_runner(adb)
         run(adb + ["shell", "am", "force-stop", PACKAGE_NAME], check=False)
         run(adb + ["shell", "rm", "-rf", STAGING_ROOT])
         run(adb + ["shell", "mkdir", "-p", STAGING_ROOT])
@@ -104,6 +106,11 @@ def main(argv: list[str] | None = None) -> int:
             if args.loop and not args.keep_running:
                 run(adb + ["shell", "am", "force-stop", PACKAGE_NAME], check=False)
     return 0
+
+
+def stop_conflicting_runner(adb: list[str]) -> None:
+    """Stop the Spatial runner before starting the native XR runner."""
+    run(adb + ["shell", "am", "force-stop", SPATIAL_PACKAGE_NAME], check=False)
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -337,12 +344,12 @@ def stage_inputs(adb: list[str], input_args: list[str]) -> str:
         raise SystemExit("Only one bare --input path is supported; use tensor=path for explicit inputs.")
 
     if named_inputs:
+        remote_names = named_input_remote_names(named_inputs)
         run(adb + ["shell", "rm", "-rf", STAGING_INPUT])
         run(adb + ["shell", "mkdir", "-p", STAGING_INPUT])
         run_as(adb, "rm -rf files/input && mkdir -p files/input")
-        for tensor_name, input_path in named_inputs:
+        for (tensor_name, input_path), remote_name in zip(named_inputs, remote_names):
             suffix = input_path.suffix or ".bin"
-            remote_name = f"{safe_input_filename(tensor_name)}{suffix}"
             staging_input_file = f"{STAGING_INPUT}/{remote_name}"
             run(adb + ["push", str(input_path), staging_input_file])
             run_as(adb, f"cp {staging_input_file} files/input/{shlex.quote(remote_name)}")
@@ -390,6 +397,24 @@ def parse_input_args(input_args: list[str]) -> tuple[list[Path], list[tuple[str,
 
 def safe_input_filename(tensor_name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", tensor_name)
+
+
+def named_input_remote_names(named_inputs: list[tuple[str, Path]]) -> list[str]:
+    remote_names = [
+        f"{safe_input_filename(tensor_name)}{input_path.suffix or '.bin'}"
+        for tensor_name, input_path in named_inputs
+    ]
+    seen: dict[str, str] = {}
+    for (tensor_name, _), remote_name in zip(named_inputs, remote_names):
+        previous_name = seen.get(remote_name)
+        if previous_name is not None:
+            raise SystemExit(
+                f"Named input filenames collide after sanitization: "
+                f"{previous_name!r} and {tensor_name!r} both map to {remote_name!r}. "
+                "Use distinct tensor names."
+            )
+        seen[remote_name] = tensor_name
+    return remote_names
 
 
 def ensure_apk_installed(adb: list[str], apk: Path) -> None:
@@ -456,9 +481,21 @@ def section_header(title: str) -> str:
 
 
 def pull_app_outputs(adb: list[str], output_dir: Path) -> Path:
-    if output_dir.exists():
-        shutil.rmtree(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(
+        tempfile.mkdtemp(
+            prefix=f".{output_dir.name}.staging-",
+            dir=output_dir.parent,
+        )
+    )
+    try:
+        return _pull_app_outputs_into(adb, staging_dir, output_dir)
+    finally:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
+
+
+def _pull_app_outputs_into(adb: list[str], staging_dir: Path, output_dir: Path) -> Path:
 
     listing = run_as_capture(adb, "find files/outputs -maxdepth 1 -type f -print", check=False)
     files = [line.strip() for line in listing.splitlines() if line.strip()]
@@ -467,11 +504,11 @@ def pull_app_outputs(adb: list[str], output_dir: Path) -> Path:
     for remote_path in files:
         filename = Path(remote_path).name
         if filename == "status.json":
-            local_path = output_dir / filename
+            local_path = staging_dir / filename
         else:
             metadata = metadata_by_file.get(filename, {})
             pipeline_id = pipeline_id_for_output(Path(filename), metadata)
-            local_root = output_dir / safe_input_filename(pipeline_id)
+            local_root = staging_dir / safe_input_filename(pipeline_id)
             if metadata and metadata.get("is_output") is False:
                 local_root = local_root / "all_tensors"
             local_root.mkdir(parents=True, exist_ok=True)
@@ -485,7 +522,30 @@ def pull_app_outputs(adb: list[str], output_dir: Path) -> Path:
         local_path.write_bytes(result.stdout)
     if not files:
         raise SystemExit("No output files were produced by the runner APK.")
+    _commit_pulled_outputs(staging_dir, output_dir)
     return output_dir
+
+
+def _commit_pulled_outputs(staging_dir: Path, output_dir: Path) -> None:
+    backup_dir: Path | None = None
+    try:
+        if output_dir.exists() or output_dir.is_symlink():
+            backup_dir = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{output_dir.name}.backup-",
+                    dir=output_dir.parent,
+                )
+            )
+            backup_dir.rmdir()
+            output_dir.rename(backup_dir)
+        staging_dir.rename(output_dir)
+    except BaseException:
+        if backup_dir is not None and backup_dir.exists() and not output_dir.exists():
+            backup_dir.rename(output_dir)
+        raise
+    else:
+        if backup_dir is not None:
+            shutil.rmtree(backup_dir, ignore_errors=True)
 
 
 def pull_remote_status(adb: list[str], files: list[str]) -> dict:

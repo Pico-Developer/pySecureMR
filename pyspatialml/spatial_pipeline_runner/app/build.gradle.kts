@@ -29,11 +29,11 @@ android {
 }
 
 dependencies {
-    implementation(platform("com.pico.spatial:bom:6.0.0"))
+    implementation(platform("com.pico.spatial:bom:6.1.9"))
     implementation("com.pico.spatial.core:core")
     implementation("com.pico.spatial.tracking:tracking")
     implementation("com.pico.spatial.sense:sense")
-    implementation("com.pico.spatial.ml:securemr:99.99.99-SNAPSHOT")
-    implementation("com.pico.spatial.ml:readback:6.0.0")
+    implementation("com.pico.spatial.ml:securemr:6.1.9")
+    implementation("com.pico.spatial.ml:readback:6.1.9")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 }

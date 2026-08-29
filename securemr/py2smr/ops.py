@@ -20,7 +20,7 @@ record themselves to the current trace context when executed.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 import numpy as np
 
@@ -171,33 +171,46 @@ def convert_color(
 def normalize(
     tensor: np.ndarray,
     output_name: Optional[str] = None,
+    *,
+    normalize_type: str = "L2",
 ) -> np.ndarray:
-    """Normalize a tensor (L2 normalization).
+    """Normalize a tensor.
 
     Corresponds to EOperatorType.NORMALIZE.
 
     Args:
         tensor: Input tensor.
+        normalize_type: Normalization mode: ``L1``, ``L2``, ``INF``, or
+            ``MINMAX``. Defaults to ``L2``.
         output_name: Optional name for the output tensor.
 
     Returns:
         Normalized tensor.
     """
-    try:
-        import cv2
-        result = cv2.normalize(tensor, None, alpha=1.0, beta=0.0, norm_type=cv2.NORM_L2)
-    except ImportError:
-        norm = np.linalg.norm(tensor)
-        if norm == 0:
-            result = tensor.astype(np.float32, copy=True)
-        else:
-            result = tensor.astype(np.float32) / norm
+    mode = (normalize_type or "L2").upper()
+    values = np.asarray(tensor, dtype=np.float32)
+    if mode == "L2":
+        scale = float(np.linalg.norm(values.astype(np.float64)))
+        result = values.copy() if scale == 0.0 else values / scale
+    elif mode == "L1":
+        scale = float(np.sum(np.abs(values), dtype=np.float64))
+        result = values.copy() if scale == 0.0 else values / scale
+    elif mode == "INF":
+        scale = float(np.max(np.abs(values))) if values.size else 0.0
+        result = values.copy() if scale == 0.0 else values / scale
+    elif mode == "MINMAX":
+        lower = float(np.min(values)) if values.size else 0.0
+        upper = float(np.max(values)) if values.size else 0.0
+        scale = upper - lower
+        result = np.zeros_like(values) if scale == 0.0 else (values - lower) / scale
+    else:
+        raise ValueError("normalize_type must be L1, L2, INF, or MINMAX")
 
     ctx = get_current_trace()
     if ctx is not None:
         ctx.record_op(
             op_type=EOperatorType.NORMALIZE,
-            attrs=[],
+            attrs=[mode],
             inputs=[tensor],
             outputs=[result],
             output_names=[output_name] if output_name else None,
@@ -513,6 +526,8 @@ def assignment(
     dst: np.ndarray,
     src_slices: Optional[List[List[int]]] = None,
     dst_slices: Optional[List[List[int]]] = None,
+    src_channel_slice: Optional[Sequence[int]] = None,
+    dst_channel_slice: Optional[Sequence[int]] = None,
     output_name: Optional[str] = None,
 ) -> np.ndarray:
     """Assign values from source to destination with optional slicing.
@@ -529,25 +544,45 @@ def assignment(
     Returns:
         Result tensor with assigned values.
     """
-    result = dst.copy()
+    def _slice(value: Sequence[int]) -> slice:
+        if len(value) not in (2, 3):
+            raise ValueError("slice descriptors must contain start, end, and optional step")
+        start, end = int(value[0]), int(value[1])
+        step = int(value[2]) if len(value) == 3 else 1
+        if step == 0:
+            raise ValueError("slice step must not be zero")
+        # The pipeline format uses -1 as an open-ended end marker.
+        return slice(start, None if end == -1 else end, step)
 
-    if src_slices is None and dst_slices is None:
-        # Full copy with type conversion
-        result = src.astype(dst.dtype)
+    def _index(
+        descriptors: Optional[Sequence[Sequence[int]]],
+        channel: Optional[Sequence[int]],
+        rank: int,
+    ) -> tuple[slice, ...]:
+        index = [slice(None)] * rank
+        if descriptors is not None:
+            if len(descriptors) > rank:
+                raise ValueError(f"slice rank {len(descriptors)} exceeds tensor rank {rank}")
+            for axis, descriptor in enumerate(descriptors):
+                index[axis] = _slice(descriptor)
+        if channel is not None:
+            if rank == 0:
+                raise ValueError("channel slices require a tensor with channels")
+            index[-1] = _slice(channel)
+        return tuple(index)
+
+    src_index = _index(src_slices, src_channel_slice, src.ndim)
+    dst_index = _index(dst_slices, dst_channel_slice, dst.ndim)
+    src_data = np.asarray(src)[src_index]
+    has_destination_slice = dst_slices is not None or dst_channel_slice is not None
+    has_source_slice = src_slices is not None or src_channel_slice is not None
+    if not has_source_slice and not has_destination_slice:
+        result = src.astype(dst.dtype, copy=True)
+    elif not has_destination_slice:
+        result = src_data.astype(dst.dtype, copy=True)
     else:
-        src_data = src
-        if src_slices is not None:
-            src_data = src[
-                src_slices[0][0]:src_slices[0][1],
-                src_slices[1][0]:src_slices[1][1]
-            ]
-        if dst_slices is not None:
-            result[
-                dst_slices[0][0]:dst_slices[0][1],
-                dst_slices[1][0]:dst_slices[1][1]
-            ] = src_data
-        else:
-            result = src_data.astype(dst.dtype)
+        result = dst.copy()
+        result[dst_index] = src_data
 
     ctx = get_current_trace()
     if ctx is not None:
@@ -556,6 +591,10 @@ def assignment(
             extra_info["src_slices"] = src_slices
         if dst_slices is not None:
             extra_info["dst_slices"] = dst_slices
+        if src_channel_slice is not None:
+            extra_info["src_channel_slice"] = list(src_channel_slice)
+        if dst_channel_slice is not None:
+            extra_info["dst_channel_slice"] = list(dst_channel_slice)
 
         ctx.record_op(
             op_type=EOperatorType.ASSIGNMENT,
@@ -570,8 +609,8 @@ def assignment(
 
 
 def nms(
-    boxes: np.ndarray,
     scores: np.ndarray,
+    boxes: np.ndarray,
     threshold: float = 0.5,
     output_name: Optional[str] = None,
 ) -> np.ndarray:
@@ -580,8 +619,8 @@ def nms(
     Corresponds to EOperatorType.NMS.
 
     Args:
-        boxes: Bounding boxes of shape (N, 4) in format [x1, y1, x2, y2].
         scores: Confidence scores of shape (N,).
+        boxes: Bounding boxes of shape (N, 4) in format [x1, y1, x2, y2].
         threshold: IoU threshold for suppression.
         output_name: Optional name for the output tensor.
 
@@ -624,7 +663,7 @@ def nms(
         ctx.record_op(
             op_type=EOperatorType.NMS,
             attrs=[str(threshold)],
-            inputs=[boxes, scores],
+            inputs=[scores, boxes],
             outputs=[result],
             output_names=[output_name] if output_name else None,
         )
@@ -1072,12 +1111,12 @@ def swap_hwc_chw(
     if arr.ndim != 3:
         raise ValueError("swap_hwc_chw expects a 3D tensor")
 
-    # Device operator currently returns a zero-filled tensor for MAT inputs.
-    # Mirror that behavior for host/device consistency.
-    if arr.shape[2] <= 4:
-        result = np.zeros((arr.shape[2], arr.shape[0], arr.shape[1]), dtype=arr.dtype)
+    # SecureMR image tensors are normally HWC. For the inverse CHW form,
+    # preserve the existing shape heuristic and transpose the data itself.
+    if arr.shape[-1] <= 4 or arr.shape[0] > 4:
+        result = np.transpose(arr, (2, 0, 1)).copy()
     else:
-        result = np.zeros((arr.shape[1], arr.shape[2], arr.shape[0]), dtype=arr.dtype)
+        result = np.transpose(arr, (1, 2, 0)).copy()
 
     ctx = get_current_trace()
     if ctx is not None:
@@ -1100,17 +1139,58 @@ def uv_to_3d_in_cam_space(
     right_image: np.ndarray,
     output_name: Optional[str] = None,
 ) -> np.ndarray:
-    """Stub for UV to 3D camera space conversion.
+    """Estimate rectified-stereo UV points in camera space.
 
     Corresponds to EOperatorType.UV_TO_3D_IN_CAM_SPACE.
     """
-    _ = (timestamp, camera_matrix, left_image, right_image)
+    _ = timestamp
     uv_array = np.asarray(uv)
     if uv_array.size % 2 != 0:
         uv_flat = np.zeros((1, 2), dtype=np.float32)
+        result = np.zeros((1, 3), dtype=np.float32)
     else:
         uv_flat = uv_array.reshape(-1, 2)
-    result = np.zeros((uv_flat.shape[0], 3), dtype=np.float32)
+        camera = np.asarray(camera_matrix, dtype=np.float32)
+        if camera.shape not in {(3, 3), (3, 4)}:
+            raise ValueError("camera_matrix must have shape (3, 3) or (3, 4)")
+        left = np.asarray(left_image)
+        right = np.asarray(right_image)
+        if left.ndim < 2 or right.ndim < 2 or left.shape[:2] != right.shape[:2]:
+            raise ValueError("left_image and right_image must have matching image dimensions")
+        fx, fy = float(camera[0, 0]), float(camera[1, 1])
+        cx, cy = float(camera[0, 2]), float(camera[1, 2])
+        if fx == 0.0 or fy == 0.0:
+            raise ValueError("camera_matrix focal lengths must be non-zero")
+        baseline = abs(float(camera[0, 3] / fx)) if camera.shape == (3, 4) else 0.06
+        baseline = baseline or 0.06
+        height, width = left.shape[:2]
+        result = np.empty((uv_flat.shape[0], 3), dtype=np.float32)
+
+        def pixel(image: np.ndarray, y: int, x: int) -> np.ndarray:
+            return np.asarray(image[y, x], dtype=np.float32).reshape(-1)
+
+        for index, (u, v) in enumerate(uv_flat.astype(np.float32)):
+            x = int(np.clip(round(float(u)), 0, width - 1))
+            y = int(np.clip(round(float(v)), 0, height - 1))
+            reference = pixel(left, y, x)
+            best_x = x
+            best_error = float("inf")
+            # Rectified stereo correspondence lies on the same image row.
+            for candidate in range(max(x - 1, 0), -1, -1):
+                error = float(np.mean(np.abs(reference - pixel(right, y, candidate))))
+                if error < best_error:
+                    best_error, best_x = error, candidate
+                    if error == 0.0:
+                        break
+            disparity = float(x - best_x)
+            # A zero disparity has no finite stereo depth. Use a documented,
+            # deterministic unit-depth fallback for host-only execution.
+            depth = fx * baseline / disparity if disparity > 0.0 else 1.0
+            result[index] = (
+                (float(u) - cx) * depth / fx,
+                (float(v) - cy) * depth / fy,
+                depth,
+            )
 
     ctx = get_current_trace()
     if ctx is not None:
@@ -1299,6 +1379,7 @@ def load_texture(
             inputs=[gltf_placeholder, texture_src],
             outputs=[result],
             output_names=[output_name] if output_name else None,
+            extra_info={"gltf_input_index": 0, "texture_input_index": 1},
         )
 
     return result
@@ -1329,6 +1410,12 @@ def switch_gltf_render_status(
             attrs=[],
             inputs=inputs,
             outputs=[],
+            extra_info={
+                "gltf_input_index": 0,
+                "pose_input_index": 1 if pose is not None else None,
+                "view_locked": bool(view_locked) if isinstance(view_locked, (bool, np.bool_)) else None,
+                "visible": bool(visible) if isinstance(visible, (bool, np.bool_)) else None,
+            },
         )
 
 
@@ -1345,11 +1432,22 @@ def update_gltf(
     _ = (gltf_placeholder, values, ids)
     ctx = get_current_trace()
     if ctx is not None:
+        inputs = [gltf_placeholder]
+        if values is not None:
+            inputs.append(values)
+        if ids is not None:
+            inputs.append(ids)
         ctx.record_op(
             op_type=EOperatorType.UPDATE_GLTF,
             attrs=[update_type],
-            inputs=[gltf_placeholder],
+            inputs=inputs,
             outputs=[],
+            extra_info={
+                "attribute": update_type,
+                "gltf_input_index": 0,
+                "values_input_index": 1 if values is not None else None,
+                "ids_input_index": 2 if ids is not None else None,
+            },
         )
 
 
@@ -1373,11 +1471,36 @@ def render_text(
          start_position, colors, texture_id, font_size)
     ctx = get_current_trace()
     if ctx is not None:
+        inputs = []
+        for tensor in (start_position, colors, texture_id, font_size):
+            if isinstance(tensor, np.ndarray):
+                inputs.append(tensor)
+        inputs.append(gltf_placeholder)
         ctx.record_op(
             op_type=EOperatorType.RENDER_TEXT,
             attrs=[f"{typeface}#{language_and_locale}#{canvas_width}#{canvas_height}", text],
-            inputs=[gltf_placeholder],
+            inputs=inputs,
             outputs=[],
+            extra_info={
+                "text": text,
+                "language_and_locale": language_and_locale,
+                "typeface": typeface,
+                "canvas_width": int(canvas_width),
+                "canvas_height": int(canvas_height),
+                "gltf_input_index": len(inputs) - 1,
+                "start_input_index": 0 if isinstance(start_position, np.ndarray) else None,
+                "colors_input_index": 1 if isinstance(colors, np.ndarray) else None,
+                "texture_id_input_index": 2 if isinstance(texture_id, np.ndarray) else None,
+                "font_size_input_index": 3 if isinstance(font_size, np.ndarray) else None,
+                "start": None if isinstance(start_position, np.ndarray) else (
+                    [0.0, 0.0] if start_position is None else np.asarray(start_position).tolist()
+                ),
+                "colors": None if isinstance(colors, np.ndarray) else (
+                    [[255, 255, 255, 255], [0, 0, 0, 0]] if colors is None else np.asarray(colors).tolist()
+                ),
+                "texture_id": None if isinstance(texture_id, np.ndarray) else (0 if texture_id is None else int(np.asarray(texture_id).reshape(-1)[0])),
+                "font_size": None if isinstance(font_size, np.ndarray) else (16.0 if font_size is None else float(np.asarray(font_size).reshape(-1)[0])),
+            },
         )
 
 
@@ -1407,24 +1530,32 @@ def scenegraph_visibility(
 
 
 def update_component(
-    component: np.ndarray,
-    update_type: str = "",
-    output_name: Optional[str] = None,
+    scenegraph: np.ndarray,
+    data: np.ndarray,
+    entity_path: str,
+    property: str,
 ) -> np.ndarray:
-    """Stub for component updates.
+    """Record a Spatial scene-graph component property update.
 
     Corresponds to EOperatorType.UPDATE_COMPONENT.
     """
-    result = np.asarray(component).copy()
+    if not entity_path.startswith("/"):
+        raise ValueError("entity_path must start with '/'")
+    if not property or not property.strip():
+        raise ValueError("property is required")
+    result = np.asarray(data).copy()
 
     ctx = get_current_trace()
     if ctx is not None:
         ctx.record_op(
             op_type=EOperatorType.UPDATE_COMPONENT,
-            attrs=[update_type] if update_type else [],
-            inputs=[component],
-            outputs=[result],
-            output_names=[output_name] if output_name else None,
+            attrs=[],
+            inputs=[scenegraph, data],
+            outputs=[],
+            extra_info={
+                "entity_path": entity_path,
+                "property": property,
+            },
         )
 
     return result

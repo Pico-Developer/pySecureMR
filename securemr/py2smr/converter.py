@@ -38,6 +38,8 @@ _OP_RUN_MODEL_INFERENCE = getattr(EOperatorType, "RUN_MODEL_INFERENCE", None)
 _OP_GET_AFFINE = getattr(EOperatorType, "GET_AFFINE", None)
 _OP_SOLVE_PNP = getattr(EOperatorType, "SOLVE_P_N_P", None)
 _OP_SORT_VEC = getattr(EOperatorType, "SORT_VEC", None)
+_OP_SWITCH_GLTF_RENDER_STATUS = getattr(EOperatorType, "SWITCH_GLTF_RENDER_STATUS", None)
+_OP_LOAD_TEXTURE = getattr(EOperatorType, "LOAD_TEXTURE", None)
 
 
 # Mapping from numpy dtype to EDataType
@@ -136,18 +138,72 @@ def _op_to_spec(op: TracedOp) -> Dict[str, Any]:
             spec["threshold"] = op.attrs[0]
     elif op.op_type == EOperatorType.CUSTOMIZED_COMPARE and op.attrs:
         spec["compare"] = op.attrs[0]
+    elif op.op_type == EOperatorType.NORMALIZE:
+        # ``compare``/``mode`` are the active native spellings for their
+        # respective operators.  Normalize's canonical named field is
+        # ``normalize_type``; always emit it because the default L2 mode is
+        # otherwise lost when a traced op has no explicit attrs.
+        spec["normalize_type"] = op.attrs[0] if op.attrs else "L2"
     elif _OP_NORM is not None and op.op_type == _OP_NORM and op.attrs:
         spec["norm_type"] = op.attrs[0]
     elif _OP_SORT_MAT is not None and op.op_type == _OP_SORT_MAT and op.attrs:
-        spec["axis"] = op.attrs[0]
+        spec["mode"] = op.attrs[0]
     elif _OP_JAVASCRIPT is not None and op.op_type == _OP_JAVASCRIPT and op.attrs:
         spec["script"] = op.attrs[0]
-    elif _OP_RENDER_TEXT is not None and op.op_type == _OP_RENDER_TEXT and op.attrs:
-        spec["config"] = op.attrs[0]
-        if len(op.attrs) > 1:
-            spec["text"] = op.attrs[1]
-    elif _OP_UPDATE_GLTF is not None and op.op_type == _OP_UPDATE_GLTF and op.attrs:
-        spec["update_type"] = op.attrs[0]
+    elif _OP_LOAD_TEXTURE is not None and op.op_type == _OP_LOAD_TEXTURE:
+        if len(op.input_names) >= 2:
+            spec["gltf"] = op.input_names[0]
+            spec["rgb_image"] = op.input_names[1]
+    elif _OP_SWITCH_GLTF_RENDER_STATUS is not None and op.op_type == _OP_SWITCH_GLTF_RENDER_STATUS:
+        if op.input_names:
+            spec["gltf"] = op.input_names[0]
+        if len(op.input_names) > 1:
+            spec["pose"] = op.input_names[1]
+        for key in ("view_locked", "visible"):
+            value = op.extra_info.get(key)
+            if value is not None:
+                spec[key] = value
+    elif _OP_UPDATE_GLTF is not None and op.op_type == _OP_UPDATE_GLTF:
+        attribute = op.extra_info.get("attribute") or (op.attrs[0] if op.attrs else "")
+        spec["attribute"] = attribute
+        if op.input_names:
+            spec["gltf"] = op.input_names[0]
+        if attribute in {"texture", "gltf_texture"} and len(op.input_names) >= 3:
+            spec["texture_src"] = op.input_names[1]
+            spec["texture_id"] = op.input_names[2]
+        elif attribute == "animation":
+            if len(op.input_names) > 1:
+                spec["animation_id"] = op.input_names[1]
+            if len(op.input_names) > 2:
+                spec["animation_timer"] = op.input_names[2]
+        elif attribute in {"world_pose", "pose"} and len(op.input_names) > 1:
+            spec["pose"] = op.input_names[1]
+        elif attribute in {"local_transform", "local_pose"}:
+            if len(op.input_names) > 1:
+                spec["transform"] = op.input_names[1]
+            if len(op.input_names) > 2:
+                spec["node_id"] = op.input_names[2]
+        elif len(op.input_names) > 2:
+            spec["material_id"] = op.input_names[2]
+            spec["value"] = op.input_names[1]
+    elif _OP_RENDER_TEXT is not None and op.op_type == _OP_RENDER_TEXT:
+        config = op.attrs[0] if op.attrs else "bold#en-us#512#64"
+        parts = config.split("#")
+        spec["typeface"] = op.extra_info.get("typeface", parts[0] if parts else "bold")
+        spec["language_and_locale"] = op.extra_info.get("language_and_locale", parts[1] if len(parts) > 1 else "en-us")
+        spec["canvas_width"] = int(op.extra_info.get("canvas_width", parts[2] if len(parts) > 2 else 512))
+        spec["canvas_height"] = int(op.extra_info.get("canvas_height", parts[3] if len(parts) > 3 else 64))
+        spec["text"] = op.extra_info.get("text", op.attrs[1] if len(op.attrs) > 1 else "")
+        gltf_index = op.extra_info.get("gltf_input_index", len(op.input_names) - 1)
+        if op.input_names:
+            spec["gltf"] = op.input_names[gltf_index]
+        for key, field in (("start_input_index", "start"), ("colors_input_index", "colors"),
+                           ("texture_id_input_index", "texture_id"), ("font_size_input_index", "font_size")):
+            index = op.extra_info.get(key)
+            if index is not None and index < len(op.input_names):
+                spec[field] = op.input_names[index]
+            elif op.extra_info.get(field) is not None:
+                spec[field] = op.extra_info[field]
     elif op.op_type == EOperatorType.SCENEGRAPH_VISIBILITY:
         spec["type"] = "scenegraph_visibility"
         if op.input_names:
@@ -159,9 +215,12 @@ def _op_to_spec(op: TracedOp) -> Dict[str, Any]:
         spec["type"] = "update_component"
         if op.input_names:
             spec["scenegraph"] = op.input_names[0]
-        if op.attrs:
-            value = _parse_bool_or_tensor(op.attrs[0])
-            spec["enabled" if isinstance(value, bool) else "data"] = value
+        if len(op.input_names) > 1:
+            spec["data"] = op.input_names[1]
+        if "entity_path" in op.extra_info:
+            spec["entity_path"] = op.extra_info["entity_path"]
+        if "property" in op.extra_info:
+            spec["property"] = op.extra_info["property"]
         spec["outputs"] = []
     elif _OP_RUN_MODEL_INFERENCE is not None and op.op_type == _OP_RUN_MODEL_INFERENCE:
         if "model_type" in op.extra_info:
@@ -179,10 +238,9 @@ def _op_to_spec(op: TracedOp) -> Dict[str, Any]:
         if "output_aliasing" in op.extra_info:
             spec["output_aliasing"] = op.extra_info["output_aliasing"]
     elif op.op_type == EOperatorType.ASSIGNMENT:
-        if "src_slices" in op.extra_info:
-            spec["src_slices"] = op.extra_info["src_slices"]
-        if "dst_slices" in op.extra_info:
-            spec["dst_slices"] = op.extra_info["dst_slices"]
+        for field in ("src_slices", "dst_slices", "src_slices_tensor", "dst_slices_tensor", "src_channel_slice", "dst_channel_slice"):
+            if field in op.extra_info:
+                spec[field] = op.extra_info[field]
 
     return spec
 

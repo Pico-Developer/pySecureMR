@@ -56,13 +56,21 @@ def test_add_tensor_marks_gltf_usage_for_sdk_loader(tmp_path):
     pipeline = tmp_path / "pipeline.json"
     pipeline_cli.init_pipeline(pipeline)
 
-    pipeline_cli.add_tensor(pipeline, "scene", shape="1,1", dtype="uint8", usage="gltf")
+    pipeline_cli.add_tensor(
+        pipeline,
+        "scene",
+        shape="1,1",
+        dtype="uint8",
+        usage="gltf",
+        asset="gltf/frame.gltf",
+    )
 
     tensor = _read_json(pipeline)["tensors"]["scene"]
     assert tensor["usage"] == 7
     assert tensor["tensor_type"] == "gltf"
     assert tensor["is_gltf"] is True
     assert tensor["is_placeholder"] is True
+    assert tensor["asset"] == "gltf/frame.gltf"
 
 
 def test_add_tensor_supports_scalar_values(tmp_path):
@@ -84,6 +92,48 @@ def test_add_tensor_supports_scalar_values(tmp_path):
     assert tensor["usage"] == 2
     assert tensor["value"] == [0.5]
     assert "flag" not in tensor
+
+
+def test_add_op_supports_inline_affine_points_and_assignment_slices(tmp_path):
+    pipeline = tmp_path / "pipeline.json"
+    pipeline_cli.init_pipeline(pipeline)
+    for name in ("src", "dst", "affine"):
+        pipeline_cli.add_tensor(pipeline, name, shape="3,2", dtype="float32")
+    pipeline_cli.add_op(
+        pipeline,
+        "get_affine",
+        inputs=[],
+        outputs=["affine"],
+        src_points="[[0, 0], [1, 0], [0, 1]]",
+        dst_points="[[1, 1], [2, 1], [1, 2]]",
+    )
+    pipeline_cli.add_op(
+        pipeline,
+        "assignment",
+        inputs=["src"],
+        outputs=["dst"],
+        src_slices="[[0, 2, 1], [0, 2, 1]]",
+        dst_slices="[[1, 3, 1], [0, 2, 1]]",
+    )
+    operators = _read_json(pipeline)["operators"]
+    assert operators[0]["src_points"] == [[0, 0], [1, 0], [0, 1]]
+    assert operators[1]["src_slices"] == [[0, 2, 1], [0, 2, 1]]
+
+
+def test_add_op_type_convert_uses_assignment_operation_identity(tmp_path):
+    pipeline = tmp_path / "pipeline.json"
+    pipeline_cli.init_pipeline(pipeline)
+    pipeline_cli.add_tensor(pipeline, "input", shape="2,2", dtype="float32")
+    pipeline_cli.add_tensor(pipeline, "output", shape="2,2", dtype="int32")
+
+    pipeline_cli.add_op(pipeline, "type_convert", inputs=["input"], outputs=["output"])
+
+    operator = _read_json(pipeline)["operators"][0]
+    assert operator == {
+        "type": "XR_SECURE_MR_OPERATOR_TYPE_ASSIGNMENT_PICO",
+        "inputs": ["input"],
+        "outputs": ["output"],
+    }
 
 
 def test_add_tensor_rejects_duplicate_and_invalid_dtype(tmp_path):
@@ -158,9 +208,10 @@ def test_add_op_requires_operator_metadata(tmp_path, op_type, inputs, outputs, m
     [
         ("convert_color", [], ["y"], "convert_color operators require exactly 1 input"),
         ("elementwise_min", ["x"], ["y"], "elementwise_min operators require exactly 2 input"),
+        ("nms", ["x"], ["y"], "nms operators require exactly 2 input"),
         ("solve_p_n_p", ["x", "y"], ["y", "z"], "solve_p_n_p operators require exactly 3 input"),
         ("rectified_vst_access", ["x"], ["y"], "rectified_vst_access operators require exactly 0 input"),
-        ("svd", ["x"], ["y"], "svd operators require exactly 3 output"),
+        ("svd", ["x"], [], "svd operators require 1 to 3 output"),
         ("javascript", ["x"], [], "javascript operators require at least 1 output"),
     ],
 )
@@ -174,6 +225,37 @@ def test_add_op_rejects_bad_operator_arity(tmp_path, op_type, inputs, outputs, m
         pipeline_cli.add_op(pipeline, op_type, inputs=inputs, outputs=outputs)
 
 
+@pytest.mark.parametrize("outputs", [["w"], ["w", "u"], ["w", "u", "vt"]])
+def test_add_op_accepts_one_to_three_svd_outputs(tmp_path, outputs):
+    pipeline = tmp_path / "pipeline.json"
+    pipeline_cli.init_pipeline(pipeline)
+    pipeline_cli.add_tensor(pipeline, "x", shape="2,2", dtype="float32")
+    for name in {"w", "u", "vt"}:
+        pipeline_cli.add_tensor(pipeline, name, shape="2,2", dtype="float32")
+
+    pipeline_cli.add_op(pipeline, "svd", inputs=["x"], outputs=outputs)
+
+    spec = json.loads(pipeline.read_text(encoding="utf-8"))
+    assert spec["operators"][-1]["type"].endswith("_SVD_PICO")
+    assert spec["operators"][-1]["outputs"] == outputs
+
+
+@pytest.mark.parametrize("outputs", [["scores"], ["scores", "boxes"], ["scores", "boxes", "indices"]])
+def test_add_op_accepts_one_to_three_nms_outputs(tmp_path, outputs):
+    pipeline = tmp_path / "pipeline.json"
+    pipeline_cli.init_pipeline(pipeline)
+    pipeline_cli.add_tensor(pipeline, "scores", shape="3", dtype="float32")
+    pipeline_cli.add_tensor(pipeline, "boxes", shape="3,4", dtype="float32")
+    for name in {"filtered_scores", "filtered_boxes", "indices"}:
+        pipeline_cli.add_tensor(pipeline, name, shape="3,4", dtype="float32")
+
+    pipeline_cli.add_op(pipeline, "nms", inputs=["scores", "boxes"], outputs=outputs)
+
+    spec = json.loads(pipeline.read_text(encoding="utf-8"))
+    assert spec["operators"][-1]["type"].endswith("_NMS_PICO")
+    assert spec["operators"][-1]["outputs"] == outputs
+
+
 def test_add_op_accepts_required_operator_metadata(tmp_path):
     pipeline = tmp_path / "pipeline.json"
     model = tmp_path / "model.tflite"
@@ -182,12 +264,16 @@ def test_add_op_accepts_required_operator_metadata(tmp_path):
     pipeline_cli.add_tensor(pipeline, "x", shape="2,2", dtype="float32", is_input=True)
     pipeline_cli.add_tensor(pipeline, "y", shape="2,2", dtype="float32", is_output=True)
     pipeline_cli.add_tensor(pipeline, "gltf", shape="1,1", dtype="uint8", usage="gltf")
+    pipeline_cli.add_tensor(pipeline, "texture", shape="2,2,3", dtype="uint8")
+    pipeline_cli.add_tensor(pipeline, "texture_ids", shape="1", dtype="uint16", usage="scalar")
 
     pipeline_cli.add_op(pipeline, "convert_color", inputs=["x"], outputs=["y"], flag="4")
     pipeline_cli.add_op(pipeline, "customized_compare", inputs=["x", "y"], outputs=["y"], attrs=[">="])
     pipeline_cli.add_op(pipeline, "javascript", inputs=["x"], outputs=["y"], attrs=["out = in;"])
     pipeline_cli.add_op(pipeline, "render_text", inputs=["gltf"], outputs=[], attrs=["bold#en-us#512#64", "hello"])
-    pipeline_cli.add_op(pipeline, "update_gltf", inputs=["gltf"], outputs=[], attrs=["texture"])
+    pipeline_cli.add_op(
+        pipeline, "update_gltf", inputs=["gltf", "texture", "texture_ids"], outputs=[], attrs=["texture"]
+    )
     pipeline_cli.add_op(pipeline, "run_model_inference", inputs=["x"], outputs=["y"], model="model.tflite")
 
     operators = _read_json(pipeline)["operators"]
@@ -196,6 +282,14 @@ def test_add_op_accepts_required_operator_metadata(tmp_path):
     assert operators[2]["attrs"] == ["out = in;"]
     assert operators[3]["attrs"] == ["bold#en-us#512#64", "hello"]
     assert operators[4]["attrs"] == ["texture"]
+    assert operators[3]["gltf"] == "gltf"
+    assert operators[3]["typeface"] == "bold"
+    assert operators[3]["language_and_locale"] == "en-us"
+    assert operators[3]["canvas_width"] == 512
+    assert operators[3]["canvas_height"] == 64
+    assert operators[3]["text"] == "hello"
+    assert operators[4]["gltf"] == "gltf"
+    assert operators[4]["attribute"] == "texture"
     assert operators[5]["model"]["bin_path"] == "model.tflite"
 
 
@@ -299,14 +393,16 @@ def test_add_op_rejects_spatial_only_operator_when_manifest_supports_xr(tmp_path
     )
     pipeline_cli.init_pipeline(pipeline)
     pipeline_cli.add_tensor(pipeline, "component", shape="1,1", dtype="uint8")
+    pipeline_cli.add_tensor(pipeline, "data", shape="1,1", dtype="float32")
 
     with pytest.raises(pipeline_cli.PipelineCliError, match="Spatial-only operator.*only includes xr"):
         pipeline_cli.add_op(
             pipeline,
             "update_component",
-            inputs=["component"],
+            inputs=["component", "data"],
             outputs=[],
-            attrs=["visibility"],
+            entity_path="/target",
+            property="Transform.Scale",
         )
 
 
@@ -352,13 +448,15 @@ def test_add_op_with_spatial_only_operator_narrows_both_mode_manifest(tmp_path):
     )
     pipeline_cli.init_pipeline(pipeline)
     pipeline_cli.add_tensor(pipeline, "component", shape="1,1", dtype="uint8")
+    pipeline_cli.add_tensor(pipeline, "data", shape="1,1", dtype="float32")
 
     pipeline_cli.add_op(
         pipeline,
         "update_component",
-        inputs=["component"],
+        inputs=["component", "data"],
         outputs=[],
-        attrs=["visibility"],
+        entity_path="/target",
+        property="Transform.Scale",
     )
 
     assert _read_json(manifest)["runtime"]["supported_modes"] == ["spatial"]
@@ -368,6 +466,7 @@ def test_add_op_spatial_only_aliases_write_sdk_fields(tmp_path):
     pipeline = tmp_path / "scene.json"
     pipeline_cli.init_pipeline(pipeline)
     pipeline_cli.add_tensor(pipeline, "scene", shape="1,1", dtype="uint8", usage="gltf")
+    pipeline_cli.add_tensor(pipeline, "scale", shape="1,3", dtype="float32")
 
     pipeline_cli.add_op(
         pipeline,
@@ -379,9 +478,10 @@ def test_add_op_spatial_only_aliases_write_sdk_fields(tmp_path):
     pipeline_cli.add_op(
         pipeline,
         "update_component",
-        inputs=["scene"],
+        inputs=["scene", "scale"],
         outputs=[],
-        attrs=["true"],
+        entity_path="/target",
+        property="Transform.Scale",
     )
 
     operators = _read_json(pipeline)["operators"]
@@ -394,10 +494,12 @@ def test_add_op_spatial_only_aliases_write_sdk_fields(tmp_path):
     }
     assert operators[1] == {
         "type": "update_component",
-        "inputs": ["scene"],
+        "inputs": ["scene", "scale"],
         "outputs": [],
         "scenegraph": "scene",
-        "enabled": True,
+        "data": "scale",
+        "entity_path": "/target",
+        "property": "Transform.Scale",
     }
 
 
@@ -515,6 +617,7 @@ def test_add_op_rejects_mixing_xr_and_spatial_only_operators_without_manifest(tm
     pipeline_cli.init_pipeline(pipeline)
     pipeline_cli.add_tensor(pipeline, "gltf", shape="1,1", dtype="uint8", usage="gltf")
     pipeline_cli.add_tensor(pipeline, "component", shape="1,1", dtype="uint8")
+    pipeline_cli.add_tensor(pipeline, "data", shape="1,1", dtype="float32")
     pipeline_cli.add_op(
         pipeline,
         "render_text",
@@ -527,9 +630,10 @@ def test_add_op_rejects_mixing_xr_and_spatial_only_operators_without_manifest(tm
         pipeline_cli.add_op(
             pipeline,
             "update_component",
-            inputs=["component"],
+            inputs=["component", "data"],
             outputs=[],
-            attrs=["visibility"],
+            entity_path="/target",
+            property="Transform.Scale",
         )
 
 

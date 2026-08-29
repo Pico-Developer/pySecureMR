@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import shutil
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 
@@ -53,6 +53,11 @@ class PipelineZooPackageSpec:
     def to_manifest_dict(self) -> JsonDict:
         """Return a manifest dictionary matching the SpatialML package schema."""
         manifest: JsonDict = {"schema_version": self.schema_version, "id": self.package_id}
+        pipeline_ids = []
+        for entry in self.pipelines:
+            if any(entry.id == pipeline_id for pipeline_id in pipeline_ids):
+                raise ValueError(f"Duplicate pipeline id: {entry.id}")
+            pipeline_ids.append(entry.id)
         manifest["pipelines"] = [entry.to_dict() for entry in self.pipelines]
         runtime = dict(self.runtime)
         if self.supported_modes:
@@ -134,12 +139,19 @@ def configure_litert_inference_operator(
         )
     else:
         raise ValueError("A run_algorithm operator requires inline model metadata")
-    result["model_type"] = "tflite"
-    result["model_target"] = model_target
-    result["cpu_target_num_threads"] = int(cpu_target_num_threads)
     if model_name is not None:
-        result["model_name"] = model_name
         result["model"].setdefault("model_name", model_name)
+    # Keep the nested v2 model object authoritative while mirroring the
+    # operator-level fields still consumed by the active native loader. This
+    # prevents an inline model's backend/thread settings from disagreeing
+    # with the compatibility fields at the same operator level.
+    model_metadata = result["model"]
+    model_metadata.setdefault("model_type", "tflite")
+    model_metadata.setdefault("model_target", model_target)
+    model_metadata.setdefault("cpu_target_num_threads", int(cpu_target_num_threads))
+    for key in ("model_name", "model_type", "model_target", "cpu_target_num_threads"):
+        if key in model_metadata:
+            result[key] = model_metadata[key]
     result.pop("model_asset", None)
     result.pop("model_file", None)
     result.pop("model_id", None)
@@ -202,11 +214,18 @@ def validate_pipeline_zoo_manifest(manifest: Mapping[str, Any]) -> None:
         raise ValueError(f"SpatialML manifest missing required fields: {', '.join(missing)}")
     if str(manifest.get("schema_version", "")) != "2":
         raise ValueError("SpatialML manifest schema_version must be 2")
+    if "model" in manifest or "models" in manifest:
+        raise ValueError("SpatialML manifest must not contain model/models; v2 stores model metadata inline")
     if not isinstance(manifest["pipelines"], list) or not manifest["pipelines"]:
         raise ValueError("SpatialML manifest requires a non-empty 'pipelines' list")
+    pipeline_ids = []
     for index, pipeline in enumerate(manifest["pipelines"]):
         if not isinstance(pipeline, Mapping) or not pipeline.get("id") or not pipeline.get("path"):
             raise ValueError(f"SpatialML manifest pipeline #{index} requires 'id' and 'path'")
+        pipeline_id = pipeline["id"]
+        if any(pipeline_id == existing_id for existing_id in pipeline_ids):
+            raise ValueError(f"Duplicate pipeline id: {pipeline_id}")
+        pipeline_ids.append(pipeline_id)
         _normalize_package_path(str(pipeline["path"]))
     runtime = manifest.get("runtime", {})
     if runtime and not isinstance(runtime, Mapping):
@@ -242,7 +261,20 @@ def _package_destination(root: Path, package_path: PathLike) -> Path:
 
 
 def _normalize_package_path(package_path: str) -> str:
-    normalized = package_path.replace("\\", "/").strip("/")
+    raw_path = str(package_path)
+    normalized = raw_path.replace("\\", "/")
+    # A package path is always relative to the package root.  Do this check
+    # before any normalization so absolute paths cannot be made to look
+    # relative by stripping their leading separator.  PureWindowsPath also
+    # catches drive-qualified and UNC paths on this POSIX host.
+    if (
+        PurePosixPath(normalized).is_absolute()
+        or PureWindowsPath(raw_path).is_absolute()
+        or bool(PureWindowsPath(raw_path).drive)
+    ):
+        raise ValueError(
+            f"Package paths must be relative (pipeline path must be package-relative): {package_path}"
+        )
     if not normalized:
         raise ValueError("Package paths must not be empty")
     parts = PurePosixPath(normalized).parts

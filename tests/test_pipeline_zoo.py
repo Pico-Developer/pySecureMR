@@ -32,6 +32,20 @@ def test_create_litert_model_spec_defaults_to_pipeline_zoo_schema():
     assert model_spec["output"][0]["name"] == "scores"
 
 
+@pytest.mark.parametrize(
+    "model_path",
+    [
+        "/tmp/model.tflite",
+        "C:/tmp/model.tflite",
+        r"C:\tmp\model.tflite",
+        r"\\server\share\model.tflite",
+    ],
+)
+def test_create_litert_model_spec_rejects_absolute_paths(model_path):
+    with pytest.raises(ValueError, match="Package paths must be relative"):
+        create_litert_model_spec(model_path, "model")
+
+
 def test_write_pipeline_zoo_package_writes_manifest_and_assets(tmp_path):
     model_file = tmp_path / "source.tflite"
     model_file.write_bytes(b"model")
@@ -96,6 +110,16 @@ def test_configure_litert_inference_operator_requires_inline_model():
     assert by_model_path["model"]["bin_path"] == "model/detector.tflite"
     assert by_inline_model["model"]["bin_path"] == "model/inline.tflite"
     assert by_inline_model["model_type"] == "tflite"
+    assert by_inline_model["model_type"] == by_inline_model["model"]["model_type"]
+
+    by_gpu_model = configure_litert_inference_operator(
+        {"type": "RUN_MODEL_INFERENCE", "inputs": [], "outputs": []},
+        model={"bin_path": "model/gpu.tflite", "model_target": "gpu",
+               "cpu_target_num_threads": 4},
+    )
+    assert by_gpu_model["model_target"] == "gpu"
+    assert by_gpu_model["model_target"] == by_gpu_model["model"]["model_target"]
+    assert by_gpu_model["cpu_target_num_threads"] == 4
 
     with pytest.raises(ValueError, match="requires inline model metadata"):
         configure_litert_inference_operator({"type": "RUN_MODEL_INFERENCE", "inputs": [], "outputs": []})
@@ -112,6 +136,38 @@ def test_validate_pipeline_zoo_rejects_path_traversal():
     with pytest.raises(ValueError, match="Invalid package-relative path"):
         validate_pipeline_zoo_manifest(
             {"schema_version": "2", "id": "bad", "pipelines": [{"id": "p", "path": "../pipeline.json"}]}
+        )
+
+
+def test_validate_pipeline_zoo_rejects_absolute_paths():
+    with pytest.raises(ValueError, match="Package paths must be relative"):
+        validate_pipeline_zoo_manifest(
+            {"schema_version": "2", "id": "bad",
+             "pipelines": [{"id": "p", "path": "/tmp/pipeline.json"}]}
+        )
+
+
+def test_pipeline_zoo_rejects_duplicate_pipeline_ids():
+    package = PipelineZooPackageSpec(
+        package_id="bad",
+        pipelines=[
+            PipelinePackageEntry("same", "pipeline/one.json"),
+            PipelinePackageEntry("same", "pipeline/two.json"),
+        ],
+    )
+    with pytest.raises(ValueError, match="Duplicate pipeline id: same"):
+        package.to_manifest_dict()
+
+    with pytest.raises(ValueError, match="Duplicate pipeline id: same"):
+        validate_pipeline_zoo_manifest(
+            {
+                "schema_version": "2",
+                "id": "bad",
+                "pipelines": [
+                    {"id": "same", "path": "pipeline/one.json"},
+                    {"id": "same", "path": "pipeline/two.json"},
+                ],
+            }
         )
 
 

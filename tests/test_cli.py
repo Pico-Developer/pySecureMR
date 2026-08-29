@@ -946,6 +946,9 @@ def test_pipeline_add_op_accepts_spatial_only_aliases(tmp_path):
     assert cli_module.main(
         ["pipeline", "add-tensor", str(pipeline), "scene", "--shape", "1,1", "--dtype", "uint8"]
     ) == 0
+    assert cli_module.main(
+        ["pipeline", "add-tensor", str(pipeline), "scale", "--shape", "1,3", "--dtype", "float32"]
+    ) == 0
 
     assert cli_module.main(
         [
@@ -967,8 +970,12 @@ def test_pipeline_add_op_accepts_spatial_only_aliases(tmp_path):
             "update_component",
             "--input",
             "scene",
-            "--attr",
-            "true",
+            "--input",
+            "scale",
+            "--entity-path",
+            "/target",
+            "--property",
+            "Transform.Scale",
         ]
     ) == 0
 
@@ -976,7 +983,9 @@ def test_pipeline_add_op_accepts_spatial_only_aliases(tmp_path):
     assert operators[0]["type"] == "scenegraph_visibility"
     assert operators[0]["visible"] is False
     assert operators[1]["type"] == "update_component"
-    assert operators[1]["enabled"] is True
+    assert operators[1]["data"] == "scale"
+    assert operators[1]["entity_path"] == "/target"
+    assert operators[1]["property"] == "Transform.Scale"
 
 
 def test_pipeline_command_reports_builder_errors(capsys, tmp_path):
