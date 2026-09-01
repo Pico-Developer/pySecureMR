@@ -40,6 +40,8 @@ class OperatorInfo:
     signature: Optional[str]
     summary: str
     supported: bool
+    native_default_loader_supported: bool
+    requires_custom_handler: bool
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -49,6 +51,8 @@ class OperatorInfo:
             "signature": self.signature,
             "summary": self.summary,
             "supported": self.supported,
+            "native_default_loader_supported": self.native_default_loader_supported,
+            "requires_custom_handler": self.requires_custom_handler,
         }
 
 
@@ -95,6 +99,16 @@ _OPERATOR_CREATORS: Mapping[str, str] = {
     "DEPTH": "depth",
 }
 
+# These creators are useful for authoring and host stubs, but the default
+# SpatialSDK package loader routes them through customOperatorHandler.
+_CUSTOM_HANDLER_ONLY = frozenset({
+    "CAMERA_SPACE_TO_WORLD",
+    "LOAD_TEXTURE",
+    "SWITCH_GLTF_RENDER_STATUS",
+    "UPDATE_GLTF",
+    "RENDER_TEXT",
+})
+
 
 def list_operators(*, as_json: bool = False) -> int:
     """Print discoverable operators."""
@@ -106,7 +120,11 @@ def list_operators(*, as_json: bool = False) -> int:
     for item in operators:
         marker = "yes" if item.supported else "no"
         creator = item.creator or "-"
-        print(f"  {item.enum_name:<32} creator={creator:<28} supported={marker}")
+        loader_support = "yes" if item.native_default_loader_supported else "no"
+        print(
+            f"  {item.enum_name:<32} creator={creator:<28} "
+            f"supported={marker} native_loader={loader_support}"
+        )
     return 0
 
 
@@ -122,6 +140,12 @@ def describe_operator(name: str, *, as_json: bool = False) -> int:
     print(f"Type: {info.type_name}")
     print(f"Creator: {info.creator or '-'}")
     print(f"Supported: {'yes' if info.supported else 'no'}")
+    print(
+        f"Native default loader supported: "
+        f"{'yes' if info.native_default_loader_supported else 'no'}"
+    )
+    if info.requires_custom_handler:
+        print("Requires downstream custom handler: yes")
     if info.signature:
         print(f"Signature: {info.signature}")
     if info.summary:
@@ -151,6 +175,8 @@ def discover_operators() -> list[OperatorInfo]:
                 signature=signature,
                 summary=summary,
                 supported=fn is not None,
+                native_default_loader_supported=enum_name not in _CUSTOM_HANDLER_ONLY,
+                requires_custom_handler=enum_name in _CUSTOM_HANDLER_ONLY,
             )
         )
     return result

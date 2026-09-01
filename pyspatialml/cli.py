@@ -214,6 +214,7 @@ def _add_pipeline_parser(subparsers: argparse._SubParsersAction) -> None:
     add_tensor.add_argument("--input", action="store_true", help="Also mark this tensor as a pipeline input.")
     add_tensor.add_argument("--output", action="store_true", help="Also mark this tensor as a pipeline output.")
     add_tensor.add_argument("--value", help="Optional comma-separated tensor values.")
+    add_tensor.add_argument("--asset", help="Package-relative asset path, primarily for glTF tensors.")
     _add_json_output_argument(add_tensor)
     add_tensor.set_defaults(func=_run_pipeline_add_tensor)
 
@@ -238,6 +239,19 @@ def _add_pipeline_parser(subparsers: argparse._SubParsersAction) -> None:
     add_op.add_argument("--model-name", help="Logical model name.")
     add_op.add_argument("--model-target", default="npu", help="Model target, defaults to npu.")
     add_op.add_argument("--cpu-target-num-threads", type=int, default=1, help="CPU thread count for CPU target.")
+    add_op.add_argument("--scenegraph", help="Scenegraph tensor for scene operations.")
+    add_op.add_argument("--entity-path", help="Entity path for update_component, starting with '/'.")
+    add_op.add_argument("--property", dest="property", help="SceneGraphProperty name for update_component.")
+    add_op.add_argument("--target-property", dest="property", help=argparse.SUPPRESS)
+    add_op.add_argument("--data", help="Data tensor for update_component.")
+    add_op.add_argument("--src-slices", help="JSON or semicolon/comma slice array for assignment.")
+    add_op.add_argument("--dst-slices", help="JSON or semicolon/comma slice array for assignment.")
+    add_op.add_argument("--src-slices-tensor", help="Tensor containing source slice descriptors.")
+    add_op.add_argument("--dst-slices-tensor", help="Tensor containing destination slice descriptors.")
+    add_op.add_argument("--src-channel-slice", help="JSON or comma-separated source channel slice.")
+    add_op.add_argument("--dst-channel-slice", help="JSON or comma-separated destination channel slice.")
+    add_op.add_argument("--src-points", help="JSON or semicolon/comma source points for get_affine.")
+    add_op.add_argument("--dst-points", help="JSON or semicolon/comma destination points for get_affine.")
     _add_json_output_argument(add_op)
     add_op.set_defaults(func=_run_pipeline_add_op)
 
@@ -315,11 +329,22 @@ def _add_run_parser(subparsers: argparse._SubParsersAction) -> None:
     run_host.add_argument("--input", action="append", default=[], help="Input tensor in name=path format. Repeatable.")
     run_host.add_argument("--dump", action="append", default=[], help="Tensor name to dump, or 'all'. Repeatable.")
     run_host.add_argument("--output-dir", type=Path, help="Directory for .npy output tensors.")
+    run_host.add_argument(
+        "--duration",
+        type=float,
+        default=15.0,
+        help="Accepted for parity with device runs; host execution currently runs one pass.",
+    )
     _add_json_output_argument(run_host)
     run_host.set_defaults(func=_run_host)
 
-    run_device = run_subparsers.add_parser("device", help="Run a package on a device through the XR runner APK.")
+    run_device = run_subparsers.add_parser("device", help="Run a package on a device through a runner APK.")
     run_device.add_argument("target", type=Path, help="Package directory or package zip.")
+    run_device.add_argument(
+        "--mode",
+        choices=["xr", "spatial"],
+        help="Runner mode. Defaults to manifest runtime.supported_modes, preferring spatial.",
+    )
     run_device.add_argument(
         "--input",
         action="append",
@@ -831,6 +856,7 @@ def _run_pipeline_add_tensor(args: argparse.Namespace) -> int:
             is_input=args.input,
             is_output=args.output,
             value=args.value,
+            asset=args.asset,
         ),
         {
             "pipeline": str(args.pipeline),
@@ -873,6 +899,18 @@ def _run_pipeline_add_op(args: argparse.Namespace) -> int:
             model_name=args.model_name,
             model_target=args.model_target,
             cpu_target_num_threads=args.cpu_target_num_threads,
+            scenegraph=args.scenegraph,
+            entity_path=args.entity_path,
+            property=args.property,
+            data=args.data,
+            src_slices=args.src_slices,
+            dst_slices=args.dst_slices,
+            src_slices_tensor=args.src_slices_tensor,
+            dst_slices_tensor=args.dst_slices_tensor,
+            src_channel_slice=args.src_channel_slice,
+            dst_channel_slice=args.dst_channel_slice,
+            src_points=args.src_points,
+            dst_points=args.dst_points,
         ),
         {
             "pipeline": str(args.pipeline),
@@ -1034,6 +1072,7 @@ def _run_host(args: argparse.Namespace) -> int:
                 inputs=args.input,
                 output_dir=args.output_dir,
                 dumps=args.dump,
+                duration=args.duration,
             )
         _print_json(
             {
@@ -1043,6 +1082,7 @@ def _run_host(args: argparse.Namespace) -> int:
                 "pipelines": list(args.pipeline),
                 "output_dir": str(args.output_dir) if args.output_dir else None,
                 "dumps": list(args.dump),
+                "duration": args.duration,
                 "stdout": stdout.getvalue(),
             }
         )
@@ -1053,6 +1093,7 @@ def _run_host(args: argparse.Namespace) -> int:
         inputs=args.input,
         output_dir=args.output_dir,
         dumps=args.dump,
+        duration=args.duration,
     )
 
 
@@ -1061,6 +1102,7 @@ def _run_device(args: argparse.Namespace) -> int:
     run_cli = _domain_module("run_cli")
     return run_cli.run_device(
         args.target,
+        mode=args.mode,
         inputs=args.input,
         pipeline_ids=args.pipeline,
         output_dir=args.output_dir,

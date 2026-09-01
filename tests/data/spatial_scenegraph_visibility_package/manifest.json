@@ -1,0 +1,15 @@
+{
+  "schema_version": "2",
+  "id": "spatial-scenegraph-visibility-test",
+  "pipelines": [
+    {
+      "id": "scenegraph_visibility",
+      "path": "pipeline/scenegraph_visibility.json"
+    }
+  ],
+  "runtime": {
+    "supported_modes": [
+      "spatial"
+    ]
+  }
+}

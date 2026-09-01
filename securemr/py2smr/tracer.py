@@ -172,6 +172,20 @@ class TraceContext:
             tensor_name = self.get_tensor_name(tensor)
             if tensor_name is None:
                 tensor_name = self.register_tensor(tensor, name=name, is_output=True)
+            elif self.tensors[tensor_name].is_input and tensor_name != name:
+                # Keep the declared input tensor intact.  An identity or
+                # pass-through function may return an input under a distinct
+                # output name; renaming the input would make the top-level
+                # inputs/outputs lists point at the same tensor.
+                output_tensor = np.asarray(tensor).copy()
+                self.tensors[name] = TensorInfo(
+                    name=name,
+                    shape=output_tensor.shape,
+                    dtype=output_tensor.dtype,
+                    value=output_tensor,
+                    is_output=True,
+                )
+                self._tensor_id_map[id(tensor)] = tensor_name
             else:
                 self.tensors[tensor_name].is_output = True
                 self.tensors[tensor_name].value = tensor.copy()

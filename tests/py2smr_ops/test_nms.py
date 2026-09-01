@@ -16,18 +16,31 @@
 import numpy as np
 import pytest
 
-from securemr.py2smr import trace, ops
+from securemr.py2smr import trace, ops, convert
 from .conftest import run_op_test, skip_if_no_device
 
 
 class TestNMS:
     """Tests for NMS operation."""
 
+    def test_serializes_scores_before_boxes(self):
+        """NMS JSON input order must match the v2 loader contract."""
+        @trace(inputs=["scores", "boxes"], outputs=["output"])
+        def traced_nms(scores, boxes):
+            return ops.nms(scores, boxes, output_name="output")
+
+        scores = np.array([0.9, 0.8], dtype=np.float32)
+        boxes = np.array([[0, 0, 10, 10], [20, 20, 30, 30]], dtype=np.float32)
+        _, ctx = traced_nms.trace(scores=scores, boxes=boxes)
+
+        spec = convert(ctx)
+        assert spec["operators"][0]["inputs"] == ["scores", "boxes"]
+
     def test_basic_nms(self):
         """Test basic NMS with overlapping boxes."""
-        @trace(inputs=["boxes", "scores"], outputs=["output"])
-        def basic_nms(boxes, scores):
-            return ops.nms(boxes, scores, threshold=0.5, output_name="output")
+        @trace(inputs=["scores", "boxes"], outputs=["output"])
+        def basic_nms(scores, boxes):
+            return ops.nms(scores, boxes, threshold=0.5, output_name="output")
 
         # Create overlapping boxes
         boxes = np.array([
@@ -39,7 +52,7 @@ class TestNMS:
 
         result, verification = run_op_test(
             basic_nms,
-            {"boxes": boxes, "scores": scores},
+            {"scores": scores, "boxes": boxes},
             "output",
         )
 
@@ -50,9 +63,9 @@ class TestNMS:
 
     def test_no_overlap(self):
         """Test NMS with non-overlapping boxes."""
-        @trace(inputs=["boxes", "scores"], outputs=["output"])
-        def no_overlap_nms(boxes, scores):
-            return ops.nms(boxes, scores, threshold=0.5, output_name="output")
+        @trace(inputs=["scores", "boxes"], outputs=["output"])
+        def no_overlap_nms(scores, boxes):
+            return ops.nms(scores, boxes, threshold=0.5, output_name="output")
 
         boxes = np.array([
             [0, 0, 10, 10],
@@ -63,7 +76,7 @@ class TestNMS:
 
         result, verification = run_op_test(
             no_overlap_nms,
-            {"boxes": boxes, "scores": scores},
+            {"scores": scores, "boxes": boxes},
             "output",
         )
 
@@ -73,9 +86,9 @@ class TestNMS:
 
     def test_high_threshold(self):
         """Test NMS with high IoU threshold (keeps more boxes)."""
-        @trace(inputs=["boxes", "scores"], outputs=["output"])
-        def high_thresh_nms(boxes, scores):
-            return ops.nms(boxes, scores, threshold=0.9, output_name="output")
+        @trace(inputs=["scores", "boxes"], outputs=["output"])
+        def high_thresh_nms(scores, boxes):
+            return ops.nms(scores, boxes, threshold=0.9, output_name="output")
 
         boxes = np.array([
             [0, 0, 10, 10],
@@ -86,7 +99,7 @@ class TestNMS:
 
         result, verification = run_op_test(
             high_thresh_nms,
-            {"boxes": boxes, "scores": scores},
+            {"scores": scores, "boxes": boxes},
             "output",
         )
 
@@ -94,9 +107,9 @@ class TestNMS:
 
     def test_low_threshold(self):
         """Test NMS with low IoU threshold (suppresses more boxes)."""
-        @trace(inputs=["boxes", "scores"], outputs=["output"])
-        def low_thresh_nms(boxes, scores):
-            return ops.nms(boxes, scores, threshold=0.1, output_name="output")
+        @trace(inputs=["scores", "boxes"], outputs=["output"])
+        def low_thresh_nms(scores, boxes):
+            return ops.nms(scores, boxes, threshold=0.1, output_name="output")
 
         boxes = np.array([
             [0, 0, 10, 10],
@@ -107,7 +120,7 @@ class TestNMS:
 
         result, verification = run_op_test(
             low_thresh_nms,
-            {"boxes": boxes, "scores": scores},
+            {"scores": scores, "boxes": boxes},
             "output",
         )
 
@@ -115,16 +128,16 @@ class TestNMS:
 
     def test_single_box(self):
         """Test NMS with single box."""
-        @trace(inputs=["boxes", "scores"], outputs=["output"])
-        def single_nms(boxes, scores):
-            return ops.nms(boxes, scores, threshold=0.5, output_name="output")
+        @trace(inputs=["scores", "boxes"], outputs=["output"])
+        def single_nms(scores, boxes):
+            return ops.nms(scores, boxes, threshold=0.5, output_name="output")
 
         boxes = np.array([[10, 10, 20, 20]], dtype=np.float32)
         scores = np.array([0.9], dtype=np.float32)
 
         result, verification = run_op_test(
             single_nms,
-            {"boxes": boxes, "scores": scores},
+            {"scores": scores, "boxes": boxes},
             "output",
         )
 
@@ -135,9 +148,9 @@ class TestNMS:
     @skip_if_no_device
     def test_nms_on_device(self):
         """Test NMS operation on device."""
-        @trace(inputs=["boxes", "scores"], outputs=["output"])
-        def device_nms(boxes, scores):
-            return ops.nms(boxes, scores, threshold=0.5, output_name="output")
+        @trace(inputs=["scores", "boxes"], outputs=["output"])
+        def device_nms(scores, boxes):
+            return ops.nms(scores, boxes, threshold=0.5, output_name="output")
 
         boxes = np.array([
             [0, 0, 10, 10],
@@ -148,7 +161,7 @@ class TestNMS:
 
         result, verification = run_op_test(
             device_nms,
-            {"boxes": boxes, "scores": scores},
+            {"scores": scores, "boxes": boxes},
             "output",
             test_device=True,
             device_duration=10,

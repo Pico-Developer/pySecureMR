@@ -17,6 +17,17 @@ def test_discover_operators_includes_arithmetic_and_model():
     assert by_name["RUN_MODEL_INFERENCE"].supported
 
 
+def test_discover_operators_marks_custom_handler_only_features():
+    operators = {item.enum_name: item for item in operator_cli.discover_operators()}
+    for name in (
+        "CAMERA_SPACE_TO_WORLD", "LOAD_TEXTURE", "SWITCH_GLTF_RENDER_STATUS",
+        "UPDATE_GLTF", "RENDER_TEXT",
+    ):
+        assert operators[name].supported
+        assert not operators[name].native_default_loader_supported
+        assert operators[name].requires_custom_handler
+
+
 def test_find_operator_accepts_enum_type_and_creator_names():
     assert operator_cli.find_operator("ARITHMETIC_COMPOSE").creator == "arithmetic"
     assert operator_cli.find_operator("XR_SECURE_MR_OPERATOR_TYPE_ARITHMETIC_COMPOSE_PICO").creator == "arithmetic"
@@ -49,6 +60,13 @@ def test_describe_operator_outputs_details(capsys):
     assert "Operator: ASSIGNMENT" in captured.out
     assert "Creator: assignment" in captured.out
     assert "Signature: assignment" in captured.out
+
+
+def test_describe_operator_reports_package_portability(capsys):
+    assert operator_cli.describe_operator("render_text") == 0
+    captured = capsys.readouterr()
+    assert "Native default loader supported: no" in captured.out
+    assert "Requires downstream custom handler: yes" in captured.out
 
 
 def test_describe_operator_json_output(capsys):

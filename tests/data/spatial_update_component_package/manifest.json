@@ -1,0 +1,15 @@
+{
+  "schema_version": "2",
+  "id": "spatial-update-component-test",
+  "pipelines": [
+    {
+      "id": "update_component",
+      "path": "pipeline/update_component.json"
+    }
+  ],
+  "runtime": {
+    "supported_modes": [
+      "spatial"
+    ]
+  }
+}

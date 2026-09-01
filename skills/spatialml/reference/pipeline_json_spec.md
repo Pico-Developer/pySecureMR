@@ -312,9 +312,13 @@ Below lists the supported operators observed in the serializers together with th
 - Spatial mode only.
 
 #### `XR_SECURE_MR_OPERATOR_TYPE_UPDATE_COMPONENT_PICO` (`update_component`)
-- Updates a Spatial component payload.
-- `inputs[0]` is the component tensor or placeholder.
-- Provide the update command via `update_type` or `attrs[0]`.
+- Updates a property of a specific entity in a Spatial scene graph.
+- `scenegraph` or `inputs[0]` identifies the scene-graph tensor.
+- `entity_path` identifies the target entity and must start with `/`; `/` refers to the scene root.
+- `property` (or `target_property`) identifies the `SceneGraphProperty`, for example `Transform.Scale`, `Text.Content`, or `PBRMaterials[0].BaseColor`.
+- `data` or `inputs[1]` identifies the tensor supplying the new property value.
+- This operator has no outputs.
+- The legacy `enabled` / `update_type` form is not a valid component update because it does not identify an entity, property, or data tensor.
 - Spatial mode only.
 
 #### `XR_SECURE_MR_OPERATOR_TYPE_MICROPHONE_PICO` (`microphone`)

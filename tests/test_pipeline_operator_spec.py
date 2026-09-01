@@ -1,6 +1,7 @@
 from securemr.core.types import EOperatorType
 from securemr.py2smr import ops
-from securemr.py2smr.verifier import _get_operator_type
+from securemr.py2smr.verifier import _get_operator_type, run_pipeline_python
+import numpy as np
 
 
 def test_verifier_accepts_documented_operator_aliases():
@@ -8,6 +9,8 @@ def test_verifier_accepts_documented_operator_aliases():
     assert _get_operator_type("cvt_color") == EOperatorType.CONVERT_COLOR
     assert _get_operator_type("arithmetic") == EOperatorType.ARITHMETIC_COMPOSE
     assert _get_operator_type("run_algorithm") == EOperatorType.RUN_MODEL_INFERENCE
+    # type_convert is an authoring alias for the assignment enum. The loader
+    # selects automatic dtype conversion from the tensor descriptors.
     assert _get_operator_type("type_convert") == EOperatorType.ASSIGNMENT
     assert _get_operator_type("XR_SECURE_MR_OPERATOR_TYPE_MAKE_TRANSFORM_MAT_PICO") == EOperatorType.GET_TRANSFORM_MAT
     assert _get_operator_type("uv2_cam") == EOperatorType.UV_TO_3D_IN_CAM_SPACE
@@ -64,3 +67,28 @@ def test_deserialized_operator_types_are_spec_creatable():
     missing_creators = [creator for creator in deserialized_operator_creators.values() if not hasattr(ops, creator)]
     assert missing_enum_members == []
     assert missing_creators == []
+
+
+def test_python_consumer_accepts_schema_comparison_field():
+    spec = {
+        "tensors": {
+            "a": {"dimensions": [1, 3], "channels": 1, "data_type": 6},
+            "b": {"dimensions": [1, 3], "channels": 1, "data_type": 6},
+            "out": {"dimensions": [1, 3], "channels": 1, "data_type": 5},
+        },
+        "operators": [{
+            "type": "XR_SECURE_MR_OPERATOR_TYPE_CUSTOMIZED_COMPARE_PICO",
+            "inputs": ["a", "b"],
+            "outputs": ["out"],
+            "comparison": "<",
+        }],
+        "inputs": ["a", "b"],
+        "outputs": ["out"],
+    }
+
+    result = run_pipeline_python(
+        spec,
+        {"a": np.array([1.0, 3.0, 2.0], dtype=np.float32),
+         "b": np.array([2.0, 2.0, 2.0], dtype=np.float32)},
+    )
+    np.testing.assert_array_equal(result["out"], [1, 0, 0])

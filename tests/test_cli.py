@@ -940,6 +940,54 @@ def test_pipeline_add_op_model_writes_inline_litert_metadata(tmp_path):
     assert "model_id" not in op
 
 
+def test_pipeline_add_op_accepts_spatial_only_aliases(tmp_path):
+    pipeline = tmp_path / "pipeline.json"
+    assert cli_module.main(["pipeline", "init", str(pipeline)]) == 0
+    assert cli_module.main(
+        ["pipeline", "add-tensor", str(pipeline), "scene", "--shape", "1,1", "--dtype", "uint8"]
+    ) == 0
+    assert cli_module.main(
+        ["pipeline", "add-tensor", str(pipeline), "scale", "--shape", "1,3", "--dtype", "float32"]
+    ) == 0
+
+    assert cli_module.main(
+        [
+            "pipeline",
+            "add-op",
+            str(pipeline),
+            "scenegraph_visibility",
+            "--input",
+            "scene",
+            "--attr",
+            "false",
+        ]
+    ) == 0
+    assert cli_module.main(
+        [
+            "pipeline",
+            "add-op",
+            str(pipeline),
+            "update_component",
+            "--input",
+            "scene",
+            "--input",
+            "scale",
+            "--entity-path",
+            "/target",
+            "--property",
+            "Transform.Scale",
+        ]
+    ) == 0
+
+    operators = json.loads(pipeline.read_text(encoding="utf-8"))["operators"]
+    assert operators[0]["type"] == "XR_SECURE_MR_OPERATOR_TYPE_SCENEGRAPH_VISIBILITY_PICO"
+    assert operators[0]["visible"] is False
+    assert operators[1]["type"] == "XR_SECURE_MR_OPERATOR_TYPE_UPDATE_COMPONENT_PICO"
+    assert operators[1]["data"] == "scale"
+    assert operators[1]["entity_path"] == "/target"
+    assert operators[1]["property"] == "Transform.Scale"
+
+
 def test_pipeline_command_reports_builder_errors(capsys, tmp_path):
     missing = tmp_path / "missing.json"
 
@@ -1305,6 +1353,8 @@ def test_run_host_command_runs_pipeline_and_saves_outputs(capsys, tmp_path):
             f"x={sample}",
             "--output-dir",
             str(output_dir),
+            "--duration",
+            "2.5",
         ]
     ) == 0
 
@@ -1366,6 +1416,8 @@ def test_run_host_command_json_wraps_summary(capsys, tmp_path):
             f"x={sample}",
             "--output-dir",
             str(output_dir),
+            "--duration",
+            "2.5",
             "--json",
         ]
     ) == 0
@@ -1374,6 +1426,7 @@ def test_run_host_command_json_wraps_summary(capsys, tmp_path):
     assert payload["ok"] is True
     assert payload["command"] == "run.host"
     assert payload["target"] == str(package)
+    assert payload["duration"] == 2.5
     assert "Host Run Summary" in payload["stdout"]
 
 
@@ -1842,6 +1895,8 @@ def test_run_device_command_forwards_options(monkeypatch, tmp_path):
             "run",
             "device",
             str(package),
+            "--mode",
+            "xr",
             "--input",
             str(image),
             "--input",
@@ -1872,6 +1927,7 @@ def test_run_device_command_forwards_options(monkeypatch, tmp_path):
 
     args, kwargs = calls[0]
     assert args == (package,)
+    assert kwargs["mode"] == "xr"
     assert kwargs["inputs"] == [str(image), f"vst_right_image={image}"]
     assert kwargs["pipeline_ids"] == ["detection", "display"]
     assert kwargs["output_dir"] == output_dir

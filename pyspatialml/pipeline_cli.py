@@ -21,7 +21,7 @@ import json
 import shutil
 import sys
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence, Union
 
 import numpy as np
 
@@ -76,8 +76,30 @@ _USAGE_ALIASES = {
 _OP_ALIASES = {
     "arithmetic": "XR_SECURE_MR_OPERATOR_TYPE_ARITHMETIC_COMPOSE_PICO",
     "assignment": "XR_SECURE_MR_OPERATOR_TYPE_ASSIGNMENT_PICO",
+    "camera_access": "XR_SECURE_MR_OPERATOR_TYPE_RECTIFIED_VST_ACCESS_PICO",
+    "cam_space_to_xr_local": "XR_SECURE_MR_OPERATOR_TYPE_CAMERA_SPACE_TO_WORLD_PICO",
+    "camera_space_to_world": "XR_SECURE_MR_OPERATOR_TYPE_CAMERA_SPACE_TO_WORLD_PICO",
+    "compare_to": "XR_SECURE_MR_OPERATOR_TYPE_CUSTOMIZED_COMPARE_PICO",
+    "cvt_color": "XR_SECURE_MR_OPERATOR_TYPE_CONVERT_COLOR_PICO",
+    "draw_text": "XR_SECURE_MR_OPERATOR_TYPE_RENDER_TEXT_PICO",
+    "get_transform_mat": "XR_SECURE_MR_OPERATOR_TYPE_GET_TRANSFORM_MAT_PICO",
+    "make_transform_mat": "XR_SECURE_MR_OPERATOR_TYPE_GET_TRANSFORM_MAT_PICO",
+    "render_gltf": "XR_SECURE_MR_OPERATOR_TYPE_SWITCH_GLTF_RENDER_STATUS_PICO",
     "run_model_inference": "XR_SECURE_MR_OPERATOR_TYPE_RUN_MODEL_INFERENCE_PICO",
+    "run_algorithm": "XR_SECURE_MR_OPERATOR_TYPE_RUN_MODEL_INFERENCE_PICO",
+    "solve_pnp": "XR_SECURE_MR_OPERATOR_TYPE_SOLVE_P_N_P_PICO",
+    "sort_matrix": "XR_SECURE_MR_OPERATOR_TYPE_SORT_MAT_PICO",
+    "sort_vector": "XR_SECURE_MR_OPERATOR_TYPE_SORT_VEC_PICO",
+    "scenegraph_visibility": "XR_SECURE_MR_OPERATOR_TYPE_SCENEGRAPH_VISIBILITY_PICO",
+    "type_convert": "XR_SECURE_MR_OPERATOR_TYPE_ASSIGNMENT_PICO",
+    "update_component": "XR_SECURE_MR_OPERATOR_TYPE_UPDATE_COMPONENT_PICO",
+    "upload_texture_to_gltf": "XR_SECURE_MR_OPERATOR_TYPE_LOAD_TEXTURE_PICO",
+    "uv2_cam": "XR_SECURE_MR_OPERATOR_TYPE_UV_TO_3D_IN_CAM_SPACE_PICO",
+    "uv_to_3d": "XR_SECURE_MR_OPERATOR_TYPE_UV_TO_3D_IN_CAM_SPACE_PICO",
+    "uv_to_3d_in_camera_space": "XR_SECURE_MR_OPERATOR_TYPE_UV_TO_3D_IN_CAM_SPACE_PICO",
 }
+_OP_SCENEGRAPH_VISIBILITY = _OP_ALIASES["scenegraph_visibility"]
+_OP_UPDATE_COMPONENT = _OP_ALIASES["update_component"]
 _XR_ONLY_OPERATORS = {
     "LOAD_TEXTURE",
     "RENDER_TEXT",
@@ -100,16 +122,16 @@ _OP_ARITY: Mapping[str, tuple[int, Optional[int], int, Optional[int]]] = {
     "ELEMENTWISE_AND": (2, 2, 1, 1),
     "ALL": (1, 1, 1, 1),
     "ANY": (1, 1, 1, 1),
-    "NMS": (2, 2, 1, 1),
-    "SOLVE_P_N_P": (3, 3, 2, 2),
+    "NMS": (2, 2, 1, 3),
+    "SOLVE_P_N_P": (3, 3, 1, 2),
     "GET_AFFINE": (2, 2, 1, 1),
     "APPLY_AFFINE": (2, 2, 1, 1),
     "APPLY_AFFINE_POINT": (2, 2, 1, 1),
     "UV_TO_3D_IN_CAM_SPACE": (5, 5, 1, 1),
     "ASSIGNMENT": (1, 2, 1, 1),
     "RUN_MODEL_INFERENCE": (1, None, 1, None),
-    "NORMALIZE": (1, 1, 1, 1),
-    "CAMERA_SPACE_TO_WORLD": (1, 1, 2, 2),
+    "NORMALIZE": (1, 2, 1, 1),
+    "CAMERA_SPACE_TO_WORLD": (1, 1, 1, 2),
     "RECTIFIED_VST_ACCESS": (0, 0, 1, 4),
     "ARGMAX": (1, 1, 1, 1),
     "CONVERT_COLOR": (1, 1, 1, 1),
@@ -121,14 +143,14 @@ _OP_ARITY: Mapping[str, tuple[int, Optional[int], int, Optional[int]]] = {
     "UPDATE_GLTF": (1, 3, 0, 0),
     "RENDER_TEXT": (1, 5, 0, 0),
     "LOAD_TEXTURE": (2, 2, 1, 1),
-    "SVD": (1, 1, 3, 3),
+    "SVD": (1, 1, 1, 3),
     "NORM": (1, 1, 1, 1),
     "SWAP_HWC_CHW": (1, 1, 1, 1),
-    "SCENEGRAPH_VISIBILITY": (1, 1, 1, 1),
-    "UPDATE_COMPONENT": (1, 1, 1, 1),
+    "SCENEGRAPH_VISIBILITY": (1, 2, 0, 0),
+    "UPDATE_COMPONENT": (1, 2, 0, 0),
     "JAVASCRIPT": (0, None, 1, None),
-    "MICROPHONE": (0, 0, 1, 1),
-    "SPEAKER": (1, 1, 1, 1),
+    "MICROPHONE": (0, 0, 1, 2),
+    "SPEAKER": (1, 1, 0, 0),
     "DEPTH": (0, 0, 1, 1),
 }
 
@@ -153,6 +175,7 @@ def add_tensor(
     is_input: bool = False,
     is_output: bool = False,
     value: Optional[str] = None,
+    asset: Optional[str] = None,
 ) -> int:
     """Add or replace a tensor descriptor."""
     spec = _load_pipeline(path)
@@ -172,8 +195,17 @@ def add_tensor(
     }
     if usage_value == _USAGE_ALIASES["matrix"]:
         tensor_spec["flag"] = mat_flag(EDataType(data_type), channels)
+    if usage_value == _USAGE_ALIASES["gltf"]:
+        tensor_spec["tensor_type"] = "gltf"
+        tensor_spec["is_gltf"] = True
+        tensor_spec["is_placeholder"] = True
     if value is not None:
         tensor_spec["value"] = _parse_value_list(value)
+    if asset is not None:
+        asset_value = asset.replace("\\", "/").lstrip("/")
+        if not asset_value or any(part in {"", ".", ".."} for part in asset_value.split("/")):
+            raise PipelineCliError(f"Invalid package-relative tensor asset: {asset}")
+        tensor_spec["asset"] = asset_value
 
     tensors[name] = tensor_spec
     if is_input:
@@ -200,23 +232,76 @@ def add_op(
     model_name: Optional[str] = None,
     model_target: str = "npu",
     cpu_target_num_threads: int = 1,
+    scenegraph: Optional[str] = None,
+    entity_path: Optional[str] = None,
+    property: Optional[str] = None,
+    data: Optional[str] = None,
+    src_slices: Any = None,
+    dst_slices: Any = None,
+    src_slices_tensor: Optional[str] = None,
+    dst_slices_tensor: Optional[str] = None,
+    src_channel_slice: Any = None,
+    dst_channel_slice: Any = None,
+    src_points: Any = None,
+    dst_points: Any = None,
 ) -> int:
     """Append an operator to a pipeline."""
     spec = _load_pipeline(path)
     tensors = _tensors(spec)
-    for tensor_name in list(inputs) + list(outputs):
+    normalized_op_type = _operator_type(op_type)
+    effective_inputs = list(inputs)
+    op_name = _operator_enum_name(normalized_op_type)
+    if op_name in {"SCENEGRAPH_VISIBILITY", "UPDATE_COMPONENT"} and scenegraph:
+        if not effective_inputs:
+            effective_inputs.append(scenegraph)
+        elif effective_inputs[0] != scenegraph:
+            raise PipelineCliError(
+                f"{op_name.lower()} --scenegraph must match the first --input tensor"
+            )
+    if op_name == "UPDATE_COMPONENT" and data and data not in effective_inputs:
+        effective_inputs.append(data)
+    referenced_names = list(effective_inputs) + list(outputs)
+    for extra_name in (src_slices_tensor, dst_slices_tensor):
+        if extra_name:
+            referenced_names.append(extra_name)
+    for tensor_name in referenced_names:
         if tensor_name and tensor_name not in tensors:
             raise PipelineCliError(f"Unknown tensor referenced by operator: {tensor_name}")
 
-    normalized_op_type = _operator_type(op_type)
-    _validate_operator_arity(normalized_op_type, inputs=inputs, outputs=outputs)
+    _validate_operator_arity(
+        normalized_op_type,
+        inputs=effective_inputs,
+        outputs=outputs,
+        has_inline_affine_points=src_points is not None or dst_points is not None,
+    )
     if normalized_op_type == _OP_ALIASES["arithmetic"] and not expression:
         raise PipelineCliError("Arithmetic operators require --expression")
-    _validate_required_operator_metadata(normalized_op_type, attrs=attrs, flag=flag, model=model)
+    _validate_required_operator_metadata(
+        normalized_op_type,
+        inputs=effective_inputs,
+        attrs=attrs,
+        flag=flag,
+        model=model,
+    )
+    _validate_structured_operator_fields(
+        normalized_op_type,
+        inputs=effective_inputs,
+        outputs=outputs,
+        scenegraph=scenegraph,
+        entity_path=entity_path,
+        property=property,
+        data=data,
+        src_points=src_points,
+        dst_points=dst_points,
+        src_slices=src_slices,
+        dst_slices=dst_slices,
+        src_slices_tensor=src_slices_tensor,
+        dst_slices_tensor=dst_slices_tensor,
+    )
 
     op = {
         "type": normalized_op_type,
-        "inputs": list(inputs),
+        "inputs": effective_inputs,
         "outputs": list(outputs),
     }
     if attrs:
@@ -243,6 +328,31 @@ def add_op(
             "model_target": model_target,
             "cpu_target_num_threads": int(cpu_target_num_threads),
         }
+    if src_slices is not None:
+        op["src_slices"] = _parse_structured_list(src_slices, "src_slices")
+    if dst_slices is not None:
+        op["dst_slices"] = _parse_structured_list(dst_slices, "dst_slices")
+    if src_slices_tensor is not None:
+        op["src_slices_tensor"] = src_slices_tensor
+    if dst_slices_tensor is not None:
+        op["dst_slices_tensor"] = dst_slices_tensor
+    if src_channel_slice is not None:
+        op["src_channel_slice"] = _parse_structured_list(src_channel_slice, "src_channel_slice")
+    if dst_channel_slice is not None:
+        op["dst_channel_slice"] = _parse_structured_list(dst_channel_slice, "dst_channel_slice")
+    if src_points is not None:
+        op["src_points"] = _parse_structured_list(src_points, "src_points")
+    if dst_points is not None:
+        op["dst_points"] = _parse_structured_list(dst_points, "dst_points")
+    _apply_spatial_operator_fields(
+        op,
+        attrs,
+        scenegraph=scenegraph,
+        entity_path=entity_path,
+        property=property,
+        data=data,
+    )
+    _apply_xr_rendering_fields(op, attrs)
 
     spec.setdefault("operators", []).append(op)
     _validate_and_write_operator_update(path, spec)
@@ -305,12 +415,15 @@ def _validate_operator_arity(
     *,
     inputs: Sequence[str],
     outputs: Sequence[str],
+    has_inline_affine_points: bool = False,
 ) -> None:
     op_name = _operator_enum_name(op_type)
     arity = _OP_ARITY.get(op_name)
     if arity is None:
         return
     min_inputs, max_inputs, min_outputs, max_outputs = arity
+    if op_name == "GET_AFFINE" and has_inline_affine_points:
+        min_inputs = max_inputs = 0
     _validate_count(
         op_name,
         "input",
@@ -353,6 +466,7 @@ def _format_count_range(minimum: int, maximum: Optional[int]) -> str:
 def _validate_required_operator_metadata(
     op_type: str,
     *,
+    inputs: Sequence[str],
     attrs: Sequence[str],
     flag: Optional[str],
     model: Optional[str],
@@ -369,8 +483,197 @@ def _validate_required_operator_metadata(
         )
     if op_type.endswith("UPDATE_GLTF_PICO") and not attrs:
         raise PipelineCliError("update_gltf operators require --attr with update type")
+    if op_type.endswith("UPDATE_GLTF_PICO") and attrs:
+        attribute = attrs[0].lower()
+        required_inputs = {
+            "texture": 3,
+            "gltf_texture": 3,
+            "animation": 2,
+            "world_pose": 2,
+            "pose": 2,
+            "local_transform": 3,
+            "local_pose": 3,
+        }.get(attribute)
+        if required_inputs is not None and len(inputs) < required_inputs:
+            raise PipelineCliError(
+                f"update_gltf {attribute} requires at least {required_inputs} input tensors"
+            )
     if op_type == _OP_ALIASES["run_model_inference"] and model is None:
         raise PipelineCliError("run_model_inference operators require --model")
+
+
+def _validate_structured_operator_fields(
+    op_type: str,
+    *,
+    inputs: Sequence[str],
+    outputs: Sequence[str],
+    scenegraph: Optional[str],
+    entity_path: Optional[str],
+    property: Optional[str],
+    data: Optional[str],
+    src_points: Any,
+    dst_points: Any,
+    src_slices: Any,
+    dst_slices: Any,
+    src_slices_tensor: Optional[str],
+    dst_slices_tensor: Optional[str],
+) -> None:
+    op_name = _operator_enum_name(op_type)
+    if op_name == "GET_AFFINE" and (src_points is not None or dst_points is not None):
+        if src_points is None or dst_points is None:
+            raise PipelineCliError("get_affine requires both --src-points and --dst-points")
+    if op_name == "UPDATE_COMPONENT":
+        if not scenegraph and not inputs:
+            raise PipelineCliError("update_component requires --scenegraph or a first --input tensor")
+        if not entity_path:
+            raise PipelineCliError("update_component requires --entity-path")
+        if not entity_path.startswith("/"):
+            raise PipelineCliError("update_component entity path must start with '/'")
+        if not property:
+            raise PipelineCliError("update_component requires --property")
+        if not data and len(inputs) < 2:
+            raise PipelineCliError("update_component requires --data or a second --input tensor")
+        if outputs:
+            raise PipelineCliError("update_component does not produce output tensors")
+    if op_name == "SCENEGRAPH_VISIBILITY":
+        if not scenegraph and not inputs:
+            raise PipelineCliError("scenegraph_visibility requires --scenegraph or a first --input tensor")
+        if len(inputs) > 2:
+            raise PipelineCliError("scenegraph_visibility accepts at most two input tensors")
+    if op_name == "ASSIGNMENT":
+        if src_slices is not None and src_slices_tensor is not None:
+            raise PipelineCliError("assignment cannot combine --src-slices and --src-slices-tensor")
+        if dst_slices is not None and dst_slices_tensor is not None:
+            raise PipelineCliError("assignment cannot combine --dst-slices and --dst-slices-tensor")
+
+
+def _apply_spatial_operator_fields(
+    op: dict[str, Any],
+    attrs: Sequence[str],
+    *,
+    scenegraph: Optional[str] = None,
+    entity_path: Optional[str] = None,
+    property: Optional[str] = None,
+    data: Optional[str] = None,
+) -> None:
+    if op["type"] == _OP_SCENEGRAPH_VISIBILITY:
+        if scenegraph:
+            op["scenegraph"] = scenegraph
+            if not op["inputs"]:
+                op["inputs"] = [scenegraph]
+        elif op["inputs"]:
+            op["scenegraph"] = op["inputs"][0]
+        if attrs:
+            op["visible"] = _parse_bool_or_tensor(attrs[0])
+    elif op["type"] == _OP_UPDATE_COMPONENT:
+        scene_name = scenegraph or (op["inputs"][0] if op["inputs"] else None)
+        data_name = data or (op["inputs"][1] if len(op["inputs"] ) > 1 else None)
+        if scene_name:
+            op["scenegraph"] = scene_name
+            if not op["inputs"]:
+                op["inputs"] = [scene_name]
+        if entity_path:
+            op["entity_path"] = entity_path
+        if property:
+            op["property"] = property
+        if data_name:
+            op["data"] = data_name
+            if data_name not in op["inputs"]:
+                op["inputs"].append(data_name)
+    if _operator_enum_name(op["type"]) in {"SCENEGRAPH_VISIBILITY", "UPDATE_COMPONENT"}:
+        op.pop("attrs", None)
+
+
+def _apply_xr_rendering_fields(op: dict[str, Any], attrs: Sequence[str]) -> None:
+    """Promote legacy GLTF attrs/positions to native XR named fields.
+
+    Keep ``attrs`` intact for older consumers, while making the schema-v2
+    representation directly consumable by the native XR deserializer.
+    """
+    op_name = _operator_enum_name(op["type"])
+    inputs = op.get("inputs", [])
+    if op_name == "LOAD_TEXTURE":
+        if len(inputs) >= 2:
+            op.setdefault("gltf", inputs[0])
+            op.setdefault("rgb_image", inputs[1])
+    elif op_name == "SWITCH_GLTF_RENDER_STATUS":
+        if inputs:
+            op.setdefault("gltf", inputs[0])
+        if len(inputs) > 1:
+            op.setdefault("pose", inputs[1])
+    elif op_name == "RENDER_TEXT":
+        if inputs:
+            op.setdefault("gltf", inputs[0])
+        if len(attrs) >= 2:
+            op.setdefault("config", attrs[0])
+            parts = attrs[0].split("#")
+            op.setdefault("typeface", parts[0] or "default")
+            op.setdefault("language_and_locale", parts[1] if len(parts) > 1 else "en-us")
+            if len(parts) > 2:
+                op.setdefault("canvas_width", _parse_int(parts[2]))
+            if len(parts) > 3:
+                op.setdefault("canvas_height", _parse_int(parts[3]))
+            op.setdefault("text", attrs[1])
+            op.setdefault("start", [0.0, 0.0])
+            op.setdefault("colors", [[255, 255, 255, 255], [0, 0, 0, 0]])
+            op.setdefault("texture_id", 0)
+            op.setdefault("font_size", 16.0)
+    elif op_name == "UPDATE_GLTF":
+        if inputs:
+            op.setdefault("gltf", inputs[0])
+        if attrs:
+            attribute = attrs[0]
+            op.setdefault("update_type", attribute)
+            if attribute in {"texture", "gltf_texture"} and len(inputs) >= 3:
+                op.setdefault("texture_src", inputs[1])
+                op.setdefault("texture_id", inputs[2])
+            elif attribute == "animation":
+                if len(inputs) > 1:
+                    op.setdefault("animation_id", inputs[1])
+                if len(inputs) > 2:
+                    op.setdefault("animation_timer", inputs[2])
+            elif attribute in {"world_pose", "pose"} and len(inputs) > 1:
+                op.setdefault("pose", inputs[1])
+            elif attribute in {"local_transform", "local_pose"}:
+                if len(inputs) > 1:
+                    op.setdefault("transform", inputs[1])
+                if len(inputs) > 2:
+                    op.setdefault("node_id", inputs[2])
+
+
+def _parse_bool_or_tensor(value: str) -> Union[bool, str]:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return value
+
+
+def _parse_structured_list(value: Any, label: str) -> Any:
+    """Parse JSON or comma-separated structured CLI values."""
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    text = str(value).strip()
+    if not text:
+        raise PipelineCliError(f"{label} cannot be empty")
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        rows = []
+        for row in text.split(";"):
+            rows.append([_parse_number(item.strip(), label) for item in row.split(",") if item.strip()])
+        parsed = rows[0] if len(rows) == 1 else rows
+    if not isinstance(parsed, list):
+        raise PipelineCliError(f"{label} must be a JSON array or comma-separated list")
+    return parsed
+
+
+def _parse_number(value: str, label: str) -> Union[int, float]:
+    try:
+        return float(value) if any(char in value.lower() for char in (".", "e")) else int(value, 0)
+    except ValueError as exc:
+        raise PipelineCliError(f"Invalid number in {label}: {value}") from exc
 
 
 def set_input(path: Path, names: Sequence[str]) -> int:

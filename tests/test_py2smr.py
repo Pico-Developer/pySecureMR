@@ -39,6 +39,42 @@ def test_convert_to_dtype_accepts_schema_v2_string_aliases():
     assert convert_to_dtype("float32", target="numpy") == np.float32
 
 
+def test_type_convert_alias_converts_host_dtype():
+    pipeline = {
+        "tensors": {
+            "input": {
+                "dimensions": [2, 1],
+                "channels": 1,
+                "data_type": 6,
+                "usage": 6,
+                "is_placeholder": True,
+            },
+            "output": {
+                "dimensions": [2, 1],
+                "channels": 1,
+                "data_type": 5,
+                "usage": 6,
+                "is_placeholder": True,
+            },
+        },
+        "operators": [{
+            "type": "XR_SECURE_MR_OPERATOR_TYPE_ASSIGNMENT_PICO",
+            "inputs": ["input"],
+            "outputs": ["output"],
+        }],
+        "inputs": ["input"],
+        "outputs": ["output"],
+    }
+
+    outputs = run_pipeline_python(
+        pipeline,
+        {"input": np.array([[1.5], [2.5]], dtype=np.float32)},
+    )
+
+    assert outputs["output"].dtype == np.int32
+    np.testing.assert_array_equal(outputs["output"], [[1], [2]])
+
+
 class TestTracer:
     """Tests for the tracer module."""
 
@@ -182,7 +218,7 @@ class TestOps:
         ], dtype=np.float32)
         scores = np.array([0.9, 0.8, 0.7], dtype=np.float32)
 
-        result = ops.nms(boxes, scores, threshold=0.5)
+        result = ops.nms(scores, boxes, threshold=0.5)
 
         # Should keep first and third (second overlaps too much with first)
         assert 0 in result
@@ -193,7 +229,7 @@ class TestOps:
         boxes = np.array([], dtype=np.float32).reshape(0, 4)
         scores = np.array([], dtype=np.float32)
 
-        result = ops.nms(boxes, scores, threshold=0.5)
+        result = ops.nms(scores, boxes, threshold=0.5)
         assert len(result) == 0
 
     def test_ops_record_to_trace(self):
@@ -287,6 +323,132 @@ class TestConverter:
 
         op_spec = spec["operators"][0]
         assert op_spec["expression"] == "{0} / 255.0 * 2.0 - 1.0"
+
+    def test_convert_spatial_only_ops_use_sdk_json_fields(self):
+        """Test that Spatial-only operators emit fields accepted by the SDK loader."""
+        @trace(inputs=["scene", "scale"], outputs=["visible"])
+        def func(scene, scale):
+            visible = ops.scenegraph_visibility(scene, visible=False)
+            ops.update_component(scene, scale, entity_path="/target", property="Transform.Scale")
+            return visible
+
+        _, ctx = func.trace(
+            scene=np.array([[1]], dtype=np.uint8),
+            scale=np.array([[1.0, 1.0, 1.0]], dtype=np.float32),
+        )
+        spec = trace_to_pipeline_spec(ctx)
+
+        assert spec["operators"][0] == {
+            "type": "XR_SECURE_MR_OPERATOR_TYPE_SCENEGRAPH_VISIBILITY_PICO",
+            "inputs": ["scene"],
+            "outputs": [],
+            "scenegraph": "scene",
+            "visible": False,
+        }
+        assert spec["operators"][1] == {
+            "type": "XR_SECURE_MR_OPERATOR_TYPE_UPDATE_COMPONENT_PICO",
+            "inputs": ["scene", "scale"],
+            "outputs": [],
+            "scenegraph": "scene",
+            "data": "scale",
+            "entity_path": "/target",
+            "property": "Transform.Scale",
+        }
+
+    def test_convert_xr_gltf_ops_emits_native_named_fields(self):
+        @trace(inputs=["gltf", "pose", "texture", "texture_ids"], outputs=["texture_id"])
+        def func(gltf, pose, texture, texture_ids):
+            ops.switch_gltf_render_status(gltf, pose=pose, view_locked=False, visible=True)
+            ops.update_gltf(gltf, update_type="texture", values=texture, ids=texture_ids)
+            return ops.load_texture(gltf, texture, output_name="texture_id")
+
+        _, ctx = func.trace(
+            gltf=np.zeros((1,), dtype=np.uint8),
+            pose=np.eye(4, dtype=np.float32),
+            texture=np.zeros((2, 2, 3), dtype=np.uint8),
+            texture_ids=np.array([0], dtype=np.uint16),
+        )
+        spec = trace_to_pipeline_spec(ctx)
+
+        render, update, load = spec["operators"]
+        assert render["gltf"] == "gltf"
+        assert render["pose"] == "pose"
+        assert render["view_locked"] is False
+        assert render["visible"] is True
+        assert update["update_type"] == "texture"
+        assert update["gltf"] == "gltf"
+        assert update["texture_src"] == "texture"
+        assert update["texture_id"] == "texture_ids"
+        assert load["gltf"] == "gltf"
+        assert load["rgb_image"] == "texture"
+        assert spec["outputs"] == ["texture_id"]
+
+    @pytest.mark.parametrize(
+        "dynamic_fields",
+        [
+            ("view_locked",),
+            ("visible",),
+            ("view_locked", "visible"),
+            ("pose", "visible"),
+        ],
+    )
+    def test_convert_xr_gltf_status_preserves_dynamic_tensor_roles(self, dynamic_fields):
+        @trace(inputs=["gltf", *dynamic_fields], outputs=["gltf"])
+        def func(gltf, **values):
+            ops.switch_gltf_render_status(
+                gltf,
+                pose=values.get("pose"),
+                view_locked=values.get("view_locked"),
+                visible=values.get("visible"),
+            )
+            return gltf
+
+        inputs = {"gltf": np.zeros((1,), dtype=np.uint8)}
+        inputs.update({
+            name: np.array([index + 1], dtype=np.int32)
+            for index, name in enumerate(dynamic_fields)
+        })
+        _, ctx = func.trace(**inputs)
+        render = trace_to_pipeline_spec(ctx)["operators"][0]
+
+        assert render["inputs"] == ["gltf", *dynamic_fields]
+        assert render["gltf"] == "gltf"
+        for name in dynamic_fields:
+            assert render[name] == name
+        for name in {"pose", "view_locked", "visible"} - set(dynamic_fields):
+            assert name not in render
+
+    def test_host_verifier_resolves_dynamic_gltf_status_tensors(self, monkeypatch):
+        calls = []
+
+        def capture(gltf, pose=None, view_locked=None, visible=None):
+            calls.append((gltf, pose, view_locked, visible))
+
+        monkeypatch.setattr(ops, "switch_gltf_render_status", capture)
+        spec = {
+            "tensors": {
+                "gltf": {"dimensions": [1, 1], "channels": 1, "data_type": 1},
+                "visible": {"dimensions": [1, 1], "channels": 1, "data_type": 5},
+            },
+            "operators": [{
+                "type": "switch_gltf_render_status",
+                "inputs": ["gltf", "visible"],
+                "outputs": [],
+                "gltf": "gltf",
+                "visible": "visible",
+            }],
+            "inputs": ["gltf", "visible"],
+            "outputs": [],
+        }
+        gltf = np.zeros((1,), dtype=np.uint8)
+        visible = np.array([1], dtype=np.int32)
+        run_pipeline_python(spec, {"gltf": gltf, "visible": visible})
+
+        assert len(calls) == 1
+        assert calls[0][0] is gltf
+        assert calls[0][1] is None
+        assert calls[0][2] is None
+        assert calls[0][3] is visible
 
 
 class TestVerifier:
@@ -547,6 +709,27 @@ class TestIntegration:
 
 class TestPythonExecutor:
     """Tests for the pure Python pipeline executor."""
+
+    def test_run_pipeline_python_preserves_non_square_h_w_output_shape(self):
+        """Host shape reconstruction must preserve schema [H, W] order."""
+        spec = {
+            "tensors": {
+                "output": {"dimensions": [3, 5], "channels": 1, "data_type": 6},
+            },
+            "operators": [
+                {
+                    "type": "XR_SECURE_MR_OPERATOR_TYPE_MICROPHONE_PICO",
+                    "inputs": [],
+                    "outputs": ["output"],
+                }
+            ],
+            "inputs": [],
+            "outputs": ["output"],
+        }
+
+        outputs = run_pipeline_python(spec, {})
+
+        assert outputs["output"].shape == (3, 5)
 
     def test_run_pipeline_python_basic(self):
         """Test basic pipeline execution with pure Python."""

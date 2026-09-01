@@ -38,6 +38,8 @@ _OP_RUN_MODEL_INFERENCE = getattr(EOperatorType, "RUN_MODEL_INFERENCE", None)
 _OP_GET_AFFINE = getattr(EOperatorType, "GET_AFFINE", None)
 _OP_SOLVE_PNP = getattr(EOperatorType, "SOLVE_P_N_P", None)
 _OP_SORT_VEC = getattr(EOperatorType, "SORT_VEC", None)
+_OP_SWITCH_GLTF_RENDER_STATUS = getattr(EOperatorType, "SWITCH_GLTF_RENDER_STATUS", None)
+_OP_LOAD_TEXTURE = getattr(EOperatorType, "LOAD_TEXTURE", None)
 
 
 # Mapping from numpy dtype to EDataType
@@ -135,41 +137,135 @@ def _op_to_spec(op: TracedOp) -> Dict[str, Any]:
         except ValueError:
             spec["threshold"] = op.attrs[0]
     elif op.op_type == EOperatorType.CUSTOMIZED_COMPARE and op.attrs:
-        spec["compare"] = op.attrs[0]
+        spec["comparison"] = op.attrs[0]
+    elif op.op_type == EOperatorType.NORMALIZE:
+        # ``compare``/``mode`` are the active native spellings for their
+        # respective operators.  Normalize's canonical named field is
+        # ``normalize_type``; always emit it because the default L2 mode is
+        # otherwise lost when a traced op has no explicit attrs.
+        spec["normalize_type"] = (op.attrs[0] if op.attrs else "l2").lower()
     elif _OP_NORM is not None and op.op_type == _OP_NORM and op.attrs:
         spec["norm_type"] = op.attrs[0]
     elif _OP_SORT_MAT is not None and op.op_type == _OP_SORT_MAT and op.attrs:
-        spec["axis"] = op.attrs[0]
+        spec["mode"] = op.attrs[0]
     elif _OP_JAVASCRIPT is not None and op.op_type == _OP_JAVASCRIPT and op.attrs:
         spec["script"] = op.attrs[0]
-    elif _OP_RENDER_TEXT is not None and op.op_type == _OP_RENDER_TEXT and op.attrs:
-        spec["config"] = op.attrs[0]
-        if len(op.attrs) > 1:
-            spec["text"] = op.attrs[1]
-    elif _OP_UPDATE_GLTF is not None and op.op_type == _OP_UPDATE_GLTF and op.attrs:
-        spec["update_type"] = op.attrs[0]
+    elif _OP_LOAD_TEXTURE is not None and op.op_type == _OP_LOAD_TEXTURE:
+        if len(op.input_names) >= 2:
+            spec["gltf"] = op.input_names[0]
+            spec["rgb_image"] = op.input_names[1]
+    elif _OP_SWITCH_GLTF_RENDER_STATUS is not None and op.op_type == _OP_SWITCH_GLTF_RENDER_STATUS:
+        gltf_index = op.extra_info.get("gltf_input_index", 0)
+        if 0 <= gltf_index < len(op.input_names):
+            spec["gltf"] = op.input_names[gltf_index]
+        for key in ("pose", "view_locked", "visible"):
+            index = op.extra_info.get(f"{key}_input_index")
+            if index is not None and 0 <= index < len(op.input_names):
+                spec[key] = op.input_names[index]
+            else:
+                value = op.extra_info.get(key)
+                if value is not None:
+                    spec[key] = value
+    elif _OP_UPDATE_GLTF is not None and op.op_type == _OP_UPDATE_GLTF:
+        attribute = op.extra_info.get("attribute") or (op.attrs[0] if op.attrs else "")
+        spec["update_type"] = attribute
+        if op.input_names:
+            spec["gltf"] = op.input_names[0]
+        def input_name(key: str, fallback: int) -> Optional[str]:
+            index = op.extra_info.get(key)
+            if index is not None and 0 <= index < len(op.input_names):
+                return op.input_names[index]
+            return op.input_names[fallback] if fallback < len(op.input_names) else None
+
+        if attribute in {"texture", "gltf_texture"}:
+            if (name := input_name("values_input_index", 1)) is not None:
+                spec["texture_src"] = name
+            if (name := input_name("ids_input_index", 2)) is not None:
+                spec["texture_id"] = name
+        elif attribute == "animation":
+            if (name := input_name("values_input_index", 1)) is not None:
+                spec["animation_id"] = name
+            if (name := input_name("ids_input_index", 2)) is not None:
+                spec["animation_timer"] = name
+        elif attribute in {"world_pose", "pose"}:
+            if (name := input_name("values_input_index", 1)) is not None:
+                spec["pose"] = name
+        elif attribute in {"local_transform", "local_pose"}:
+            if (name := input_name("values_input_index", 1)) is not None:
+                spec["transform"] = name
+            if (name := input_name("ids_input_index", 2)) is not None:
+                spec["node_id"] = name
+        elif len(op.input_names) > 1:
+            if (name := input_name("values_input_index", 1)) is not None:
+                spec["value"] = name
+            if (name := input_name("ids_input_index", 2)) is not None:
+                spec["material_id"] = name
+    elif _OP_RENDER_TEXT is not None and op.op_type == _OP_RENDER_TEXT:
+        config = op.attrs[0] if op.attrs else "bold#en-us#512#64"
+        parts = config.split("#")
+        spec["typeface"] = op.extra_info.get("typeface", parts[0] if parts else "bold")
+        spec["language_and_locale"] = op.extra_info.get("language_and_locale", parts[1] if len(parts) > 1 else "en-us")
+        spec["canvas_width"] = int(op.extra_info.get("canvas_width", parts[2] if len(parts) > 2 else 512))
+        spec["canvas_height"] = int(op.extra_info.get("canvas_height", parts[3] if len(parts) > 3 else 64))
+        spec["text"] = op.extra_info.get("text", op.attrs[1] if len(op.attrs) > 1 else "")
+        spec["config"] = config
+        gltf_index = op.extra_info.get("gltf_input_index", len(op.input_names) - 1)
+        if op.input_names:
+            spec["gltf"] = op.input_names[gltf_index]
+        for key, field in (("start_input_index", "start"), ("colors_input_index", "colors"),
+                           ("texture_id_input_index", "texture_id"), ("font_size_input_index", "font_size")):
+            index = op.extra_info.get(key)
+            if index is not None and index < len(op.input_names):
+                spec[field] = op.input_names[index]
+            elif op.extra_info.get(field) is not None:
+                spec[field] = op.extra_info[field]
+    elif op.op_type == EOperatorType.SCENEGRAPH_VISIBILITY:
+        spec["type"] = type_to_name(op.op_type)
+        if op.input_names:
+            spec["scenegraph"] = op.input_names[0]
+        visible_index = op.extra_info.get("visible_input_index")
+        if visible_index is not None and 0 <= visible_index < len(op.input_names):
+            spec["visible"] = op.input_names[visible_index]
+        elif op.extra_info.get("visible") is not None:
+            spec["visible"] = op.extra_info["visible"]
+        elif op.attrs:
+            spec["visible"] = _parse_bool_or_tensor(op.attrs[0])
+        spec["outputs"] = []
+    elif op.op_type == EOperatorType.UPDATE_COMPONENT:
+        spec["type"] = type_to_name(op.op_type)
+        if op.input_names:
+            spec["scenegraph"] = op.input_names[0]
+        if len(op.input_names) > 1:
+            spec["data"] = op.input_names[1]
+        if "entity_path" in op.extra_info:
+            spec["entity_path"] = op.extra_info["entity_path"]
+        if "property" in op.extra_info:
+            spec["property"] = op.extra_info["property"]
+        spec["outputs"] = []
     elif _OP_RUN_MODEL_INFERENCE is not None and op.op_type == _OP_RUN_MODEL_INFERENCE:
-        if "model_type" in op.extra_info:
-            spec["model_type"] = op.extra_info["model_type"]
-        if "model_target" in op.extra_info:
-            spec["model_target"] = op.extra_info["model_target"]
-        if "cpu_target_num_threads" in op.extra_info:
-            spec["cpu_target_num_threads"] = op.extra_info["cpu_target_num_threads"]
         if "model" in op.extra_info:
-            spec["model"] = op.extra_info["model"]
-        if "model_name" in op.extra_info:
-            spec["model_name"] = op.extra_info["model_name"]
-        if "input_aliasing" in op.extra_info:
-            spec["input_aliasing"] = op.extra_info["input_aliasing"]
-        if "output_aliasing" in op.extra_info:
-            spec["output_aliasing"] = op.extra_info["output_aliasing"]
+            spec["model"] = dict(op.extra_info["model"])
+            if spec["model"].get("model_target") != "cpu":
+                spec["model"].pop("cpu_target_num_threads", None)
+        if op.extra_info.get("input_refs"):
+            spec["inputs"] = op.extra_info["input_refs"]
+        if op.extra_info.get("output_refs"):
+            spec["outputs"] = op.extra_info["output_refs"]
     elif op.op_type == EOperatorType.ASSIGNMENT:
-        if "src_slices" in op.extra_info:
-            spec["src_slices"] = op.extra_info["src_slices"]
-        if "dst_slices" in op.extra_info:
-            spec["dst_slices"] = op.extra_info["dst_slices"]
+        for field in ("src_slices", "dst_slices", "src_slices_tensor", "dst_slices_tensor", "src_channel_slice", "dst_channel_slice"):
+            if field in op.extra_info:
+                spec[field] = op.extra_info[field]
 
     return spec
+
+
+def _parse_bool_or_tensor(value: str) -> Union[bool, str]:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return value
 
 
 def trace_to_pipeline_spec(ctx: TraceContext) -> Dict[str, Any]:
@@ -193,7 +289,34 @@ def trace_to_pipeline_spec(ctx: TraceContext) -> Dict[str, Any]:
 
     # Determine inputs and outputs
     inputs = [name for name, info in ctx.tensors.items() if info.is_input]
-    outputs = [name for name, info in ctx.tensors.items() if info.is_output]
+    command_only_outputs = {
+        output_name
+        for op in ctx.operations
+        if op.op_type in {EOperatorType.SCENEGRAPH_VISIBILITY, EOperatorType.UPDATE_COMPONENT}
+        for output_name in op.output_names
+    }
+    outputs = [
+        name
+        for name, info in ctx.tensors.items()
+        if info.is_output and name not in command_only_outputs
+    ]
+
+    # A tensor cannot be both a pipeline input placeholder and an output
+    # placeholder in the package contract.  Give an in-place/identity output
+    # its own local tensor name while preserving the declared input.
+    overlapping = set(inputs) & set(outputs)
+    for name in sorted(overlapping):
+        output_name = f"{name}_output"
+        suffix = 1
+        while output_name in tensors:
+            output_name = f"{name}_output_{suffix}"
+            suffix += 1
+        output_spec = dict(tensors[name])
+        output_spec["is_placeholder"] = True
+        tensors[output_name] = output_spec
+        outputs[outputs.index(name)] = output_name
+        for op in ctx.operations:
+            op.output_names = [output_name if item == name else item for item in op.output_names]
 
     # Fix up tensor specs for scalar-result operators (ALL/ANY).
     scalar_result_ops = {EOperatorType.ALL, EOperatorType.ANY}

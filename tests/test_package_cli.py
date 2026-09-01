@@ -1,5 +1,6 @@
 import json
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -68,6 +69,7 @@ def test_create_package_normalizes_pipeline_and_model_paths(tmp_path):
     assert manifest["runtime"]["supported_modes"] == ["spatial"]
     assert (output / "model" / "face.tflite").read_bytes() == b"model"
     assert packaged_pipeline["operators"][0]["model"]["bin_path"] == "model/face.tflite"
+    assert packaged_pipeline["operators"][0]["model_target"] == packaged_pipeline["operators"][0]["model"].get("model_target", "npu")
     assert "model_file" not in packaged_pipeline["operators"][0]
     assert "model_asset" not in packaged_pipeline["operators"][0]
     assert "model_id" not in packaged_pipeline["operators"][0]
@@ -126,6 +128,25 @@ def test_create_package_normalizes_gltf_tensor_assets(tmp_path):
     assert packaged_pipeline["tensors"]["scene"]["asset"] == "gltf/frame.gltf"
 
 
+def test_validate_package_reports_gltf_materialization_requirement(tmp_path, capsys):
+    source_dir = tmp_path / "src"
+    pipeline = source_dir / "display.json"
+    gltf = source_dir / "frame.gltf"
+    _write_json(
+        pipeline,
+        {
+            "tensors": {"scene": {"tensor_type": "gltf", "asset": "frame.gltf"}},
+            "operators": [], "inputs": [], "outputs": [],
+        },
+    )
+    gltf.write_text("{}", encoding="utf-8")
+    output = tmp_path / "pkg"
+    package_cli.create_package(package_id="display-demo", pipelines=[f"display={pipeline}"], output=output)
+
+    assert package_cli.validate_package(output) == 0
+    assert "GLTF tensor asset materialization" in capsys.readouterr().out
+
+
 def test_create_package_infers_common_operator_modes_when_supported_modes_omitted(tmp_path):
     pipeline = tmp_path / "pipeline.json"
     _write_json(pipeline, _pipeline_with_operator("assignment"))
@@ -166,6 +187,17 @@ def test_create_package_infers_spatial_mode_from_spatial_only_operator(tmp_path)
     )
 
     assert _read_json(output / "manifest.json")["runtime"]["supported_modes"] == ["spatial"]
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    [
+        "spatial_scenegraph_visibility_package",
+        "spatial_update_component_package",
+    ],
+)
+def test_spatial_only_fixture_packages_validate(fixture):
+    assert package_cli.validate_package(Path("tests/data") / fixture) == 0
 
 
 def test_create_package_errors_for_missing_asset(tmp_path):
@@ -219,6 +251,31 @@ def test_create_package_zip_output_and_validate(tmp_path):
     assert "pipeline/main.json" in names
     assert "model/face.tflite" in names
     assert package_cli.validate_package(archive) == 0
+
+
+def test_validate_package_zip_does_not_delete_archive_sibling_directory(tmp_path):
+    archive = tmp_path / "foo.zip"
+    sibling = tmp_path / "foo"
+    sentinel = sibling / "keep.txt"
+    sentinel.parent.mkdir()
+    sentinel.write_text("must survive validation", encoding="utf-8")
+    with zipfile.ZipFile(archive, "w") as package_zip:
+        package_zip.writestr(
+            "manifest.json",
+            json.dumps(
+                {
+                    "schema_version": "2",
+                    "id": "demo",
+                    "pipelines": [
+                        {"id": "main", "path": "pipeline/main.json"}
+                    ],
+                }
+            ),
+        )
+        package_zip.writestr("pipeline/main.json", "{}")
+
+    assert package_cli.validate_package(archive) == 0
+    assert sentinel.read_text(encoding="utf-8") == "must survive validation"
 
 
 def test_create_package_repacks_existing_package_root_without_pipeline_arg(tmp_path):

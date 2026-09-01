@@ -27,8 +27,13 @@ def test_run_model_inference_records_inline_litert_metadata():
     assert out_map["_538"].dtype == np.float32
     assert out_map["_539"].shape == (1,)
     assert out_map["_539"].dtype == np.int32
-    assert op["model_type"] == "tflite"
+    assert op["inputs"] == [{"name": "input", "tensor": "input_1"}]
+    assert op["outputs"] == [
+        {"name": "_538", "tensor": "_538"},
+        {"name": "_539", "tensor": "_539"},
+    ]
     assert op["model"]["bin_path"] == "model/mnist.tflite"
+    assert op["model"]["model_type"] == "tflite"
     assert op["model"]["model_name"] == "mnist"
     assert "model_file" not in op
     assert "model_asset" not in op
