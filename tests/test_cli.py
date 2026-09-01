@@ -980,9 +980,9 @@ def test_pipeline_add_op_accepts_spatial_only_aliases(tmp_path):
     ) == 0
 
     operators = json.loads(pipeline.read_text(encoding="utf-8"))["operators"]
-    assert operators[0]["type"] == "scenegraph_visibility"
+    assert operators[0]["type"] == "XR_SECURE_MR_OPERATOR_TYPE_SCENEGRAPH_VISIBILITY_PICO"
     assert operators[0]["visible"] is False
-    assert operators[1]["type"] == "update_component"
+    assert operators[1]["type"] == "XR_SECURE_MR_OPERATOR_TYPE_UPDATE_COMPONENT_PICO"
     assert operators[1]["data"] == "scale"
     assert operators[1]["entity_path"] == "/target"
     assert operators[1]["property"] == "Transform.Scale"

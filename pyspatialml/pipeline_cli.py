@@ -557,7 +557,6 @@ def _apply_spatial_operator_fields(
     data: Optional[str] = None,
 ) -> None:
     if op["type"] == _OP_SCENEGRAPH_VISIBILITY:
-        op["type"] = "scenegraph_visibility"
         if scenegraph:
             op["scenegraph"] = scenegraph
             if not op["inputs"]:
@@ -567,7 +566,6 @@ def _apply_spatial_operator_fields(
         if attrs:
             op["visible"] = _parse_bool_or_tensor(attrs[0])
     elif op["type"] == _OP_UPDATE_COMPONENT:
-        op["type"] = "update_component"
         scene_name = scenegraph or (op["inputs"][0] if op["inputs"] else None)
         data_name = data or (op["inputs"][1] if len(op["inputs"] ) > 1 else None)
         if scene_name:
@@ -582,7 +580,7 @@ def _apply_spatial_operator_fields(
             op["data"] = data_name
             if data_name not in op["inputs"]:
                 op["inputs"].append(data_name)
-    if op["type"] in {"scenegraph_visibility", "update_component"}:
+    if _operator_enum_name(op["type"]) in {"SCENEGRAPH_VISIBILITY", "UPDATE_COMPONENT"}:
         op.pop("attrs", None)
 
 
@@ -607,6 +605,7 @@ def _apply_xr_rendering_fields(op: dict[str, Any], attrs: Sequence[str]) -> None
         if inputs:
             op.setdefault("gltf", inputs[0])
         if len(attrs) >= 2:
+            op.setdefault("config", attrs[0])
             parts = attrs[0].split("#")
             op.setdefault("typeface", parts[0] or "default")
             op.setdefault("language_and_locale", parts[1] if len(parts) > 1 else "en-us")
@@ -624,7 +623,7 @@ def _apply_xr_rendering_fields(op: dict[str, Any], attrs: Sequence[str]) -> None
             op.setdefault("gltf", inputs[0])
         if attrs:
             attribute = attrs[0]
-            op.setdefault("attribute", attribute)
+            op.setdefault("update_type", attribute)
             if attribute in {"texture", "gltf_texture"} and len(inputs) >= 3:
                 op.setdefault("texture_src", inputs[1])
                 op.setdefault("texture_id", inputs[2])

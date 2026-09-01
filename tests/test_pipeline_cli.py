@@ -289,7 +289,7 @@ def test_add_op_accepts_required_operator_metadata(tmp_path):
     assert operators[3]["canvas_height"] == 64
     assert operators[3]["text"] == "hello"
     assert operators[4]["gltf"] == "gltf"
-    assert operators[4]["attribute"] == "texture"
+    assert operators[4]["update_type"] == "texture"
     assert operators[5]["model"]["bin_path"] == "model.tflite"
 
 
@@ -486,14 +486,14 @@ def test_add_op_spatial_only_aliases_write_sdk_fields(tmp_path):
 
     operators = _read_json(pipeline)["operators"]
     assert operators[0] == {
-        "type": "scenegraph_visibility",
+        "type": "XR_SECURE_MR_OPERATOR_TYPE_SCENEGRAPH_VISIBILITY_PICO",
         "inputs": ["scene"],
         "outputs": [],
         "scenegraph": "scene",
         "visible": False,
     }
     assert operators[1] == {
-        "type": "update_component",
+        "type": "XR_SECURE_MR_OPERATOR_TYPE_UPDATE_COMPONENT_PICO",
         "inputs": ["scene", "scale"],
         "outputs": [],
         "scenegraph": "scene",

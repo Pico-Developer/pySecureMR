@@ -49,7 +49,7 @@ class TestNormalizeOp:
         _, ctx = normalize_vec.trace(x=np.array([[3.0, 4.0]], dtype=np.float32))
         spec = convert(ctx)
 
-        assert spec["operators"][0]["normalize_type"] == "L2"
+        assert spec["operators"][0]["normalize_type"] == "l2"
 
     def test_normalize_accepts_named_modes(self):
         value = np.array([[1.0, -2.0]], dtype=np.float32)

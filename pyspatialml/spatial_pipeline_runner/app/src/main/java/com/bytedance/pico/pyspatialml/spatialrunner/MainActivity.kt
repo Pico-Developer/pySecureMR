@@ -361,8 +361,11 @@ private class SpatialRunner(private val context: Context) {
     private fun File.decodeImage(spec: TensorSpec): ByteArray {
         val source = BitmapFactory.decodeFile(absolutePath)
             ?: error("failed to decode image input: $absolutePath")
-        val width = spec.dimensions.getOrNull(0) ?: source.width
-        val height = spec.dimensions.getOrNull(1) ?: source.height
+        // SpatialML tensor dimensions use [height, width] ordering.
+        // Keep the decoded bitmap geometry consistent with the package schema
+        // for non-square image tensors.
+        val height = spec.dimensions.getOrNull(0) ?: source.height
+        val width = spec.dimensions.getOrNull(1) ?: source.width
         val cropped = source.centerCrop(width, height)
         val scaled =
             if (cropped.width == width && cropped.height == height) cropped

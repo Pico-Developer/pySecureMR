@@ -529,6 +529,17 @@ def _execute_operator(
         resolved = _resolve_tensor_name(name) if name is not None else None
         return tensors.get(resolved) if resolved is not None else None
 
+    def named_or_value(field: str, index: Optional[int] = None) -> Any:
+        """Resolve a named tensor field while preserving scalar fields."""
+        value = op_spec.get(field)
+        if isinstance(value, str):
+            resolved = _resolve_tensor_name(value)
+            if resolved is not None and resolved in tensors:
+                return tensors[resolved]
+        elif value is not None:
+            return value
+        return named_tensor(field, index) if index is not None else None
+
     def first_tensor(*values: Optional[np.ndarray]) -> Optional[np.ndarray]:
         for value in values:
             if value is not None:
@@ -941,13 +952,18 @@ def _execute_operator(
         gltf_name = op_spec.get("gltf") or (input_refs[0] if input_refs else None)
         gltf = tensors.get(_resolve_tensor_name(gltf_name)) if gltf_name is not None else None
         if gltf is not None:
-            pose_name = op_spec.get("pose")
-            pose = tensors.get(_resolve_tensor_name(pose_name)) if pose_name is not None else None
+            # Older hand-authored specs used input position 1 for pose.  Do
+            # not apply that fallback when named dynamic status fields are
+            # present, otherwise a visible/view_locked tensor is mistaken for
+            # pose.
+            pose_index = 1 if not any(
+                field in op_spec for field in ("view_locked", "visible")
+            ) else None
             ops_module.switch_gltf_render_status(
                 gltf,
-                pose=pose,
-                view_locked=op_spec.get("view_locked"),
-                visible=op_spec.get("visible"),
+                pose=named_or_value("pose", pose_index),
+                view_locked=named_or_value("view_locked"),
+                visible=named_or_value("visible"),
             )
 
     elif op_type == EOperatorType.UPDATE_GLTF:
@@ -1009,9 +1025,11 @@ def _execute_operator(
         if input_tensors:
             attrs = op_spec.get("attrs", [])
             visible = op_spec.get("visible", attrs[0] if attrs else True)
+            if isinstance(visible, str) and visible in tensors:
+                visible = tensors[visible]
             if isinstance(visible, str):
                 visible = visible.strip().lower() not in {"0", "false", "no", "off"}
-            result = ops_module.scenegraph_visibility(input_tensors[0], visible=bool(visible))
+            result = ops_module.scenegraph_visibility(input_tensors[0], visible=visible)
             if output_names:
                 tensors[output_names[0]] = result
 
@@ -1037,9 +1055,7 @@ def _execute_operator(
 
     elif op_type == EOperatorType.SPEAKER:
         if input_tensors:
-            result = ops_module.speaker(input_tensors[0])
-            if output_names:
-                tensors[output_names[0]] = result
+            ops_module.speaker(input_tensors[0])
 
     elif op_type == EOperatorType.DEPTH:
         shape = get_output_shape(output_names[0] if output_names else None) or (1, 1)

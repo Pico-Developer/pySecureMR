@@ -339,14 +339,14 @@ class TestConverter:
         spec = trace_to_pipeline_spec(ctx)
 
         assert spec["operators"][0] == {
-            "type": "scenegraph_visibility",
+            "type": "XR_SECURE_MR_OPERATOR_TYPE_SCENEGRAPH_VISIBILITY_PICO",
             "inputs": ["scene"],
             "outputs": [],
             "scenegraph": "scene",
             "visible": False,
         }
         assert spec["operators"][1] == {
-            "type": "update_component",
+            "type": "XR_SECURE_MR_OPERATOR_TYPE_UPDATE_COMPONENT_PICO",
             "inputs": ["scene", "scale"],
             "outputs": [],
             "scenegraph": "scene",
@@ -375,13 +375,80 @@ class TestConverter:
         assert render["pose"] == "pose"
         assert render["view_locked"] is False
         assert render["visible"] is True
-        assert update["attribute"] == "texture"
+        assert update["update_type"] == "texture"
         assert update["gltf"] == "gltf"
         assert update["texture_src"] == "texture"
         assert update["texture_id"] == "texture_ids"
         assert load["gltf"] == "gltf"
         assert load["rgb_image"] == "texture"
         assert spec["outputs"] == ["texture_id"]
+
+    @pytest.mark.parametrize(
+        "dynamic_fields",
+        [
+            ("view_locked",),
+            ("visible",),
+            ("view_locked", "visible"),
+            ("pose", "visible"),
+        ],
+    )
+    def test_convert_xr_gltf_status_preserves_dynamic_tensor_roles(self, dynamic_fields):
+        @trace(inputs=["gltf", *dynamic_fields], outputs=["gltf"])
+        def func(gltf, **values):
+            ops.switch_gltf_render_status(
+                gltf,
+                pose=values.get("pose"),
+                view_locked=values.get("view_locked"),
+                visible=values.get("visible"),
+            )
+            return gltf
+
+        inputs = {"gltf": np.zeros((1,), dtype=np.uint8)}
+        inputs.update({
+            name: np.array([index + 1], dtype=np.int32)
+            for index, name in enumerate(dynamic_fields)
+        })
+        _, ctx = func.trace(**inputs)
+        render = trace_to_pipeline_spec(ctx)["operators"][0]
+
+        assert render["inputs"] == ["gltf", *dynamic_fields]
+        assert render["gltf"] == "gltf"
+        for name in dynamic_fields:
+            assert render[name] == name
+        for name in {"pose", "view_locked", "visible"} - set(dynamic_fields):
+            assert name not in render
+
+    def test_host_verifier_resolves_dynamic_gltf_status_tensors(self, monkeypatch):
+        calls = []
+
+        def capture(gltf, pose=None, view_locked=None, visible=None):
+            calls.append((gltf, pose, view_locked, visible))
+
+        monkeypatch.setattr(ops, "switch_gltf_render_status", capture)
+        spec = {
+            "tensors": {
+                "gltf": {"dimensions": [1, 1], "channels": 1, "data_type": 1},
+                "visible": {"dimensions": [1, 1], "channels": 1, "data_type": 5},
+            },
+            "operators": [{
+                "type": "switch_gltf_render_status",
+                "inputs": ["gltf", "visible"],
+                "outputs": [],
+                "gltf": "gltf",
+                "visible": "visible",
+            }],
+            "inputs": ["gltf", "visible"],
+            "outputs": [],
+        }
+        gltf = np.zeros((1,), dtype=np.uint8)
+        visible = np.array([1], dtype=np.int32)
+        run_pipeline_python(spec, {"gltf": gltf, "visible": visible})
+
+        assert len(calls) == 1
+        assert calls[0][0] is gltf
+        assert calls[0][1] is None
+        assert calls[0][2] is None
+        assert calls[0][3] is visible
 
 
 class TestVerifier:

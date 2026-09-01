@@ -523,11 +523,13 @@ def any(
 
 def assignment(
     src: np.ndarray,
-    dst: np.ndarray,
+    dst: Optional[np.ndarray] = None,
     src_slices: Optional[List[List[int]]] = None,
     dst_slices: Optional[List[List[int]]] = None,
     src_channel_slice: Optional[Sequence[int]] = None,
     dst_channel_slice: Optional[Sequence[int]] = None,
+    src_slices_tensor: Optional[Union[str, np.ndarray]] = None,
+    dst_slices_tensor: Optional[Union[str, np.ndarray]] = None,
     output_name: Optional[str] = None,
 ) -> np.ndarray:
     """Assign values from source to destination with optional slicing.
@@ -571,12 +573,28 @@ def assignment(
             index[-1] = _slice(channel)
         return tuple(index)
 
+    def _tensor_slice_value(value, inline_value, field):
+        if value is None:
+            return inline_value
+        if inline_value is not None:
+            raise ValueError(f"{field} cannot be combined with its inline slice")
+        if isinstance(value, str):
+            raise ValueError(f"{field} string references require a resolved tensor")
+        return np.asarray(value).tolist()
+
+    src_slices = _tensor_slice_value(src_slices_tensor, src_slices, "src_slices_tensor")
+    dst_slices = _tensor_slice_value(dst_slices_tensor, dst_slices, "dst_slices_tensor")
+    destination_was_omitted = dst is None
+    if dst is None:
+        dst = np.asarray(src).copy()
     src_index = _index(src_slices, src_channel_slice, src.ndim)
     dst_index = _index(dst_slices, dst_channel_slice, dst.ndim)
     src_data = np.asarray(src)[src_index]
     has_destination_slice = dst_slices is not None or dst_channel_slice is not None
     has_source_slice = src_slices is not None or src_channel_slice is not None
-    if not has_source_slice and not has_destination_slice:
+    if destination_was_omitted and not has_destination_slice:
+        result = src_data.astype(src.dtype, copy=True)
+    elif not has_source_slice and not has_destination_slice:
         result = src.astype(dst.dtype, copy=True)
     elif not has_destination_slice:
         result = src_data.astype(dst.dtype, copy=True)
@@ -587,19 +605,32 @@ def assignment(
     ctx = get_current_trace()
     if ctx is not None:
         extra_info = {}
-        if src_slices is not None:
+        if src_slices is not None and src_slices_tensor is None:
             extra_info["src_slices"] = src_slices
-        if dst_slices is not None:
+        if dst_slices is not None and dst_slices_tensor is None:
             extra_info["dst_slices"] = dst_slices
         if src_channel_slice is not None:
             extra_info["src_channel_slice"] = list(src_channel_slice)
         if dst_channel_slice is not None:
             extra_info["dst_channel_slice"] = list(dst_channel_slice)
+        if isinstance(src_slices_tensor, str):
+            extra_info["src_slices_tensor"] = src_slices_tensor
+        elif isinstance(src_slices_tensor, np.ndarray):
+            tensor_name = ctx.get_tensor_name(src_slices_tensor)
+            if tensor_name is not None:
+                extra_info["src_slices_tensor"] = tensor_name
+        if isinstance(dst_slices_tensor, str):
+            extra_info["dst_slices_tensor"] = dst_slices_tensor
+        elif isinstance(dst_slices_tensor, np.ndarray):
+            tensor_name = ctx.get_tensor_name(dst_slices_tensor)
+            if tensor_name is not None:
+                extra_info["dst_slices_tensor"] = tensor_name
 
+        record_inputs = [src] if destination_was_omitted else [src, dst]
         ctx.record_op(
             op_type=EOperatorType.ASSIGNMENT,
             attrs=[],
-            inputs=[src, dst],
+            inputs=record_inputs,
             outputs=[result],
             output_names=[output_name] if output_name else None,
             extra_info=extra_info,
@@ -1324,7 +1355,7 @@ def run_model_inference(
             "model_name": model_name,
             "model_type": "tflite",
             "model_target": model_target,
-            "cpu_target_num_threads": int(cpu_target_num_threads),
+            **({"cpu_target_num_threads": int(cpu_target_num_threads)} if model_target == "cpu" else {}),
         }
     else:
         model = dict(model)
@@ -1332,10 +1363,17 @@ def run_model_inference(
         model.setdefault("model_name", model_name)
         model.setdefault("model_type", "tflite")
         model.setdefault("model_target", model_target)
-        model.setdefault("cpu_target_num_threads", int(cpu_target_num_threads))
+        if model.get("model_target") == "cpu":
+            model.setdefault("cpu_target_num_threads", int(cpu_target_num_threads))
 
     ctx = get_current_trace()
     if ctx is not None:
+        input_refs = []
+        for alias, tensor in inputs.items():
+            tensor_name = ctx.get_tensor_name(tensor)
+            if tensor_name is not None:
+                input_refs.append({"name": alias, "tensor": tensor_name})
+        output_refs = [{"name": name, "tensor": name} for name in output_names]
         extra_info = {
             "model_name": model_name,
             "model_type": model_type,
@@ -1344,6 +1382,8 @@ def run_model_inference(
             "input_aliasing": input_aliasing or {},
             "output_aliasing": output_aliasing or {},
             "output_names": output_names,
+            "input_refs": input_refs,
+            "output_refs": output_refs,
             "model": model,
             "output_shapes": [tuple(shape) for shape in output_shapes],
         }
@@ -1399,11 +1439,15 @@ def switch_gltf_render_status(
     ctx = get_current_trace()
     if ctx is not None:
         inputs = [gltf_placeholder]
+        input_indices = {}
         if pose is not None:
+            input_indices["pose"] = len(inputs)
             inputs.append(pose)
         if isinstance(view_locked, np.ndarray):
+            input_indices["view_locked"] = len(inputs)
             inputs.append(view_locked)
         if isinstance(visible, np.ndarray):
+            input_indices["visible"] = len(inputs)
             inputs.append(visible)
         ctx.record_op(
             op_type=EOperatorType.SWITCH_GLTF_RENDER_STATUS,
@@ -1412,7 +1456,9 @@ def switch_gltf_render_status(
             outputs=[],
             extra_info={
                 "gltf_input_index": 0,
-                "pose_input_index": 1 if pose is not None else None,
+                "pose_input_index": input_indices.get("pose"),
+                "view_locked_input_index": input_indices.get("view_locked"),
+                "visible_input_index": input_indices.get("visible"),
                 "view_locked": bool(view_locked) if isinstance(view_locked, (bool, np.bool_)) else None,
                 "visible": bool(visible) if isinstance(visible, (bool, np.bool_)) else None,
             },
@@ -1433,9 +1479,12 @@ def update_gltf(
     ctx = get_current_trace()
     if ctx is not None:
         inputs = [gltf_placeholder]
+        input_indices = {}
         if values is not None:
+            input_indices["values"] = len(inputs)
             inputs.append(values)
         if ids is not None:
+            input_indices["ids"] = len(inputs)
             inputs.append(ids)
         ctx.record_op(
             op_type=EOperatorType.UPDATE_GLTF,
@@ -1443,10 +1492,11 @@ def update_gltf(
             inputs=inputs,
             outputs=[],
             extra_info={
+                "update_type": update_type,
                 "attribute": update_type,
                 "gltf_input_index": 0,
-                "values_input_index": 1 if values is not None else None,
-                "ids_input_index": 2 if ids is not None else None,
+                "values_input_index": input_indices.get("values"),
+                "ids_input_index": input_indices.get("ids"),
             },
         )
 
@@ -1471,11 +1521,18 @@ def render_text(
          start_position, colors, texture_id, font_size)
     ctx = get_current_trace()
     if ctx is not None:
-        inputs = []
-        for tensor in (start_position, colors, texture_id, font_size):
+        inputs = [gltf_placeholder]
+        input_indices = {}
+        for name, tensor in (
+            ("start", start_position),
+            ("colors", colors),
+            ("texture_id", texture_id),
+            ("font_size", font_size),
+        ):
             if isinstance(tensor, np.ndarray):
+                input_indices[name] = len(inputs)
                 inputs.append(tensor)
-        inputs.append(gltf_placeholder)
+        gltf_input_index = 0
         ctx.record_op(
             op_type=EOperatorType.RENDER_TEXT,
             attrs=[f"{typeface}#{language_and_locale}#{canvas_width}#{canvas_height}", text],
@@ -1487,11 +1544,11 @@ def render_text(
                 "typeface": typeface,
                 "canvas_width": int(canvas_width),
                 "canvas_height": int(canvas_height),
-                "gltf_input_index": len(inputs) - 1,
-                "start_input_index": 0 if isinstance(start_position, np.ndarray) else None,
-                "colors_input_index": 1 if isinstance(colors, np.ndarray) else None,
-                "texture_id_input_index": 2 if isinstance(texture_id, np.ndarray) else None,
-                "font_size_input_index": 3 if isinstance(font_size, np.ndarray) else None,
+                "gltf_input_index": gltf_input_index,
+                "start_input_index": input_indices.get("start"),
+                "colors_input_index": input_indices.get("colors"),
+                "texture_id_input_index": input_indices.get("texture_id"),
+                "font_size_input_index": input_indices.get("font_size"),
                 "start": None if isinstance(start_position, np.ndarray) else (
                     [0.0, 0.0] if start_position is None else np.asarray(start_position).tolist()
                 ),
@@ -1506,7 +1563,7 @@ def render_text(
 
 def scenegraph_visibility(
     scenegraph: np.ndarray,
-    visible: bool = True,
+    visible: Union[np.ndarray, bool] = True,
     output_name: Optional[str] = None,
 ) -> np.ndarray:
     """Stub for scenegraph visibility updates.
@@ -1514,16 +1571,21 @@ def scenegraph_visibility(
     Corresponds to EOperatorType.SCENEGRAPH_VISIBILITY.
     """
     _ = scenegraph
-    result = np.array([1 if visible else 0], dtype=np.uint8)
+    visible_value = bool(np.asarray(visible).reshape(-1)[0]) if isinstance(visible, np.ndarray) else bool(visible)
+    result = np.array([1 if visible_value else 0], dtype=np.uint8)
 
     ctx = get_current_trace()
     if ctx is not None:
         ctx.record_op(
             op_type=EOperatorType.SCENEGRAPH_VISIBILITY,
-            attrs=["true" if visible else "false"],
-            inputs=[scenegraph],
+            attrs=["true" if visible_value else "false"],
+            inputs=[scenegraph, visible] if isinstance(visible, np.ndarray) else [scenegraph],
             outputs=[result],
             output_names=[output_name] if output_name else None,
+            extra_info={
+                "visible_input_index": 1 if isinstance(visible, np.ndarray) else None,
+                "visible": None if isinstance(visible, np.ndarray) else visible_value,
+            },
         )
 
     return result
@@ -1581,24 +1643,20 @@ def microphone(output_shape: tuple = (1,), output_name: Optional[str] = None) ->
     return result
 
 
-def speaker(audio: np.ndarray, output_name: Optional[str] = None) -> np.ndarray:
+def speaker(audio: np.ndarray, output_name: Optional[str] = None) -> None:
     """Stub for speaker playback.
 
     Corresponds to EOperatorType.SPEAKER.
     """
-    result = np.array([0], dtype=np.uint8)
-
     ctx = get_current_trace()
     if ctx is not None:
         ctx.record_op(
             op_type=EOperatorType.SPEAKER,
             attrs=[],
             inputs=[audio],
-            outputs=[result],
-            output_names=[output_name] if output_name else None,
+            outputs=[],
+            output_names=[],
         )
-
-    return result
 
 
 def depth(output_shape: tuple = (1, 1), output_name: Optional[str] = None) -> np.ndarray:
@@ -1833,12 +1891,19 @@ def javascript(
 
     ctx = get_current_trace()
     if ctx is not None:
+        input_refs = []
+        for alias, tensor in inputs.items():
+            tensor_name = ctx.get_tensor_name(tensor)
+            if tensor_name is not None:
+                input_refs.append({"name": alias, "tensor": tensor_name})
+        output_refs = [{"name": name, "tensor": name} for name in output_names]
         ctx.record_op(
             op_type=_OP_JAVASCRIPT,
             attrs=[js_code],
             inputs=list(inputs.values()),
             outputs=list(outputs.values()),
             output_names=output_names,
+            extra_info={"input_refs": input_refs, "output_refs": output_refs},
         )
 
     return outputs
