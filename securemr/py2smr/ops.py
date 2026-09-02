@@ -19,10 +19,8 @@ record themselves to the current trace context when executed.
 
 from __future__ import annotations
 
-import os
-
 import re
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 import numpy as np
 
@@ -67,6 +65,11 @@ __all__ = [
     "switch_gltf_render_status",
     "update_gltf",
     "render_text",
+    "scenegraph_visibility",
+    "update_component",
+    "microphone",
+    "speaker",
+    "depth",
     "javascript",
     "unknown",
 ]
@@ -77,11 +80,16 @@ def _eval_arithmetic_expression(tensor: np.ndarray, expression: str) -> np.ndarr
 
     Supports expressions like "{0} / 255.0", "{0} + {1}", etc.
     """
-    # Simple single-operand expression
-    expr = expression.replace("{0}", "x")
-    # Use numpy for evaluation
-    x = tensor.astype(np.float32)
-    return eval(expr, {"__builtins__": {}, "x": x, "np": np})
+    tensors = list(tensor) if isinstance(tensor, (list, tuple)) else [tensor]
+    expr = expression
+    env = {"np": np}
+    for index, value in enumerate(tensors):
+        name = f"x{index}"
+        expr = expr.replace("{" + str(index) + "}", name)
+        env[name] = np.asarray(value).astype(np.float32)
+    if "x0" in env:
+        env["x"] = env["x0"]
+    return eval(expr, {"__builtins__": {}}, env)
 
 
 def arithmetic(
@@ -163,33 +171,46 @@ def convert_color(
 def normalize(
     tensor: np.ndarray,
     output_name: Optional[str] = None,
+    *,
+    normalize_type: str = "L2",
 ) -> np.ndarray:
-    """Normalize a tensor (L2 normalization).
+    """Normalize a tensor.
 
     Corresponds to EOperatorType.NORMALIZE.
 
     Args:
         tensor: Input tensor.
+        normalize_type: Normalization mode: ``L1``, ``L2``, ``INF``, or
+            ``MINMAX``. Defaults to ``L2``.
         output_name: Optional name for the output tensor.
 
     Returns:
         Normalized tensor.
     """
-    try:
-        import cv2
-        result = cv2.normalize(tensor, None, alpha=1.0, beta=0.0, norm_type=cv2.NORM_L2)
-    except ImportError:
-        norm = np.linalg.norm(tensor)
-        if norm == 0:
-            result = tensor.astype(np.float32, copy=True)
-        else:
-            result = tensor.astype(np.float32) / norm
+    mode = (normalize_type or "L2").upper()
+    values = np.asarray(tensor, dtype=np.float32)
+    if mode == "L2":
+        scale = float(np.linalg.norm(values.astype(np.float64)))
+        result = values.copy() if scale == 0.0 else values / scale
+    elif mode == "L1":
+        scale = float(np.sum(np.abs(values), dtype=np.float64))
+        result = values.copy() if scale == 0.0 else values / scale
+    elif mode == "INF":
+        scale = float(np.max(np.abs(values))) if values.size else 0.0
+        result = values.copy() if scale == 0.0 else values / scale
+    elif mode == "MINMAX":
+        lower = float(np.min(values)) if values.size else 0.0
+        upper = float(np.max(values)) if values.size else 0.0
+        scale = upper - lower
+        result = np.zeros_like(values) if scale == 0.0 else (values - lower) / scale
+    else:
+        raise ValueError("normalize_type must be L1, L2, INF, or MINMAX")
 
     ctx = get_current_trace()
     if ctx is not None:
         ctx.record_op(
             op_type=EOperatorType.NORMALIZE,
-            attrs=[],
+            attrs=[mode],
             inputs=[tensor],
             outputs=[result],
             output_names=[output_name] if output_name else None,
@@ -502,9 +523,13 @@ def any(
 
 def assignment(
     src: np.ndarray,
-    dst: np.ndarray,
+    dst: Optional[np.ndarray] = None,
     src_slices: Optional[List[List[int]]] = None,
     dst_slices: Optional[List[List[int]]] = None,
+    src_channel_slice: Optional[Sequence[int]] = None,
+    dst_channel_slice: Optional[Sequence[int]] = None,
+    src_slices_tensor: Optional[Union[str, np.ndarray]] = None,
+    dst_slices_tensor: Optional[Union[str, np.ndarray]] = None,
     output_name: Optional[str] = None,
 ) -> np.ndarray:
     """Assign values from source to destination with optional slicing.
@@ -521,38 +546,91 @@ def assignment(
     Returns:
         Result tensor with assigned values.
     """
-    result = dst.copy()
+    def _slice(value: Sequence[int]) -> slice:
+        if len(value) not in (2, 3):
+            raise ValueError("slice descriptors must contain start, end, and optional step")
+        start, end = int(value[0]), int(value[1])
+        step = int(value[2]) if len(value) == 3 else 1
+        if step == 0:
+            raise ValueError("slice step must not be zero")
+        # The pipeline format uses -1 as an open-ended end marker.
+        return slice(start, None if end == -1 else end, step)
 
-    if src_slices is None and dst_slices is None:
-        # Full copy with type conversion
-        result = src.astype(dst.dtype)
+    def _index(
+        descriptors: Optional[Sequence[Sequence[int]]],
+        channel: Optional[Sequence[int]],
+        rank: int,
+    ) -> tuple[slice, ...]:
+        index = [slice(None)] * rank
+        if descriptors is not None:
+            if len(descriptors) > rank:
+                raise ValueError(f"slice rank {len(descriptors)} exceeds tensor rank {rank}")
+            for axis, descriptor in enumerate(descriptors):
+                index[axis] = _slice(descriptor)
+        if channel is not None:
+            if rank == 0:
+                raise ValueError("channel slices require a tensor with channels")
+            index[-1] = _slice(channel)
+        return tuple(index)
+
+    def _tensor_slice_value(value, inline_value, field):
+        if value is None:
+            return inline_value
+        if inline_value is not None:
+            raise ValueError(f"{field} cannot be combined with its inline slice")
+        if isinstance(value, str):
+            raise ValueError(f"{field} string references require a resolved tensor")
+        return np.asarray(value).tolist()
+
+    src_slices = _tensor_slice_value(src_slices_tensor, src_slices, "src_slices_tensor")
+    dst_slices = _tensor_slice_value(dst_slices_tensor, dst_slices, "dst_slices_tensor")
+    destination_was_omitted = dst is None
+    if dst is None:
+        dst = np.asarray(src).copy()
+    src_index = _index(src_slices, src_channel_slice, src.ndim)
+    dst_index = _index(dst_slices, dst_channel_slice, dst.ndim)
+    src_data = np.asarray(src)[src_index]
+    has_destination_slice = dst_slices is not None or dst_channel_slice is not None
+    has_source_slice = src_slices is not None or src_channel_slice is not None
+    if destination_was_omitted and not has_destination_slice:
+        result = src_data.astype(src.dtype, copy=True)
+    elif not has_source_slice and not has_destination_slice:
+        result = src.astype(dst.dtype, copy=True)
+    elif not has_destination_slice:
+        result = src_data.astype(dst.dtype, copy=True)
     else:
-        src_data = src
-        if src_slices is not None:
-            src_data = src[
-                src_slices[0][0]:src_slices[0][1],
-                src_slices[1][0]:src_slices[1][1]
-            ]
-        if dst_slices is not None:
-            result[
-                dst_slices[0][0]:dst_slices[0][1],
-                dst_slices[1][0]:dst_slices[1][1]
-            ] = src_data
-        else:
-            result = src_data.astype(dst.dtype)
+        result = dst.copy()
+        result[dst_index] = src_data
 
     ctx = get_current_trace()
     if ctx is not None:
         extra_info = {}
-        if src_slices is not None:
+        if src_slices is not None and src_slices_tensor is None:
             extra_info["src_slices"] = src_slices
-        if dst_slices is not None:
+        if dst_slices is not None and dst_slices_tensor is None:
             extra_info["dst_slices"] = dst_slices
+        if src_channel_slice is not None:
+            extra_info["src_channel_slice"] = list(src_channel_slice)
+        if dst_channel_slice is not None:
+            extra_info["dst_channel_slice"] = list(dst_channel_slice)
+        if isinstance(src_slices_tensor, str):
+            extra_info["src_slices_tensor"] = src_slices_tensor
+        elif isinstance(src_slices_tensor, np.ndarray):
+            tensor_name = ctx.get_tensor_name(src_slices_tensor)
+            if tensor_name is not None:
+                extra_info["src_slices_tensor"] = tensor_name
+        if isinstance(dst_slices_tensor, str):
+            extra_info["dst_slices_tensor"] = dst_slices_tensor
+        elif isinstance(dst_slices_tensor, np.ndarray):
+            tensor_name = ctx.get_tensor_name(dst_slices_tensor)
+            if tensor_name is not None:
+                extra_info["dst_slices_tensor"] = tensor_name
 
+        record_inputs = [src] if destination_was_omitted else [src, dst]
         ctx.record_op(
             op_type=EOperatorType.ASSIGNMENT,
             attrs=[],
-            inputs=[src, dst],
+            inputs=record_inputs,
             outputs=[result],
             output_names=[output_name] if output_name else None,
             extra_info=extra_info,
@@ -562,8 +640,8 @@ def assignment(
 
 
 def nms(
-    boxes: np.ndarray,
     scores: np.ndarray,
+    boxes: np.ndarray,
     threshold: float = 0.5,
     output_name: Optional[str] = None,
 ) -> np.ndarray:
@@ -572,8 +650,8 @@ def nms(
     Corresponds to EOperatorType.NMS.
 
     Args:
-        boxes: Bounding boxes of shape (N, 4) in format [x1, y1, x2, y2].
         scores: Confidence scores of shape (N,).
+        boxes: Bounding boxes of shape (N, 4) in format [x1, y1, x2, y2].
         threshold: IoU threshold for suppression.
         output_name: Optional name for the output tensor.
 
@@ -616,7 +694,7 @@ def nms(
         ctx.record_op(
             op_type=EOperatorType.NMS,
             attrs=[str(threshold)],
-            inputs=[boxes, scores],
+            inputs=[scores, boxes],
             outputs=[result],
             output_names=[output_name] if output_name else None,
         )
@@ -1064,12 +1142,12 @@ def swap_hwc_chw(
     if arr.ndim != 3:
         raise ValueError("swap_hwc_chw expects a 3D tensor")
 
-    # Device operator currently returns a zero-filled tensor for MAT inputs.
-    # Mirror that behavior for host/device consistency.
-    if arr.shape[2] <= 4:
-        result = np.zeros((arr.shape[2], arr.shape[0], arr.shape[1]), dtype=arr.dtype)
+    # SecureMR image tensors are normally HWC. For the inverse CHW form,
+    # preserve the existing shape heuristic and transpose the data itself.
+    if arr.shape[-1] <= 4 or arr.shape[0] > 4:
+        result = np.transpose(arr, (2, 0, 1)).copy()
     else:
-        result = np.zeros((arr.shape[1], arr.shape[2], arr.shape[0]), dtype=arr.dtype)
+        result = np.transpose(arr, (1, 2, 0)).copy()
 
     ctx = get_current_trace()
     if ctx is not None:
@@ -1092,13 +1170,58 @@ def uv_to_3d_in_cam_space(
     right_image: np.ndarray,
     output_name: Optional[str] = None,
 ) -> np.ndarray:
-    """Stub for UV to 3D camera space conversion.
+    """Estimate rectified-stereo UV points in camera space.
 
     Corresponds to EOperatorType.UV_TO_3D_IN_CAM_SPACE.
     """
-    _ = (timestamp, camera_matrix, left_image, right_image)
-    uv_flat = np.asarray(uv).reshape(-1, 2)
-    result = np.zeros((uv_flat.shape[0], 3), dtype=np.float32)
+    _ = timestamp
+    uv_array = np.asarray(uv)
+    if uv_array.size % 2 != 0:
+        uv_flat = np.zeros((1, 2), dtype=np.float32)
+        result = np.zeros((1, 3), dtype=np.float32)
+    else:
+        uv_flat = uv_array.reshape(-1, 2)
+        camera = np.asarray(camera_matrix, dtype=np.float32)
+        if camera.shape not in {(3, 3), (3, 4)}:
+            raise ValueError("camera_matrix must have shape (3, 3) or (3, 4)")
+        left = np.asarray(left_image)
+        right = np.asarray(right_image)
+        if left.ndim < 2 or right.ndim < 2 or left.shape[:2] != right.shape[:2]:
+            raise ValueError("left_image and right_image must have matching image dimensions")
+        fx, fy = float(camera[0, 0]), float(camera[1, 1])
+        cx, cy = float(camera[0, 2]), float(camera[1, 2])
+        if fx == 0.0 or fy == 0.0:
+            raise ValueError("camera_matrix focal lengths must be non-zero")
+        baseline = abs(float(camera[0, 3] / fx)) if camera.shape == (3, 4) else 0.06
+        baseline = baseline or 0.06
+        height, width = left.shape[:2]
+        result = np.empty((uv_flat.shape[0], 3), dtype=np.float32)
+
+        def pixel(image: np.ndarray, y: int, x: int) -> np.ndarray:
+            return np.asarray(image[y, x], dtype=np.float32).reshape(-1)
+
+        for index, (u, v) in enumerate(uv_flat.astype(np.float32)):
+            x = int(np.clip(round(float(u)), 0, width - 1))
+            y = int(np.clip(round(float(v)), 0, height - 1))
+            reference = pixel(left, y, x)
+            best_x = x
+            best_error = float("inf")
+            # Rectified stereo correspondence lies on the same image row.
+            for candidate in range(max(x - 1, 0), -1, -1):
+                error = float(np.mean(np.abs(reference - pixel(right, y, candidate))))
+                if error < best_error:
+                    best_error, best_x = error, candidate
+                    if error == 0.0:
+                        break
+            disparity = float(x - best_x)
+            # A zero disparity has no finite stereo depth. Use a documented,
+            # deterministic unit-depth fallback for host-only execution.
+            depth = fx * baseline / disparity if disparity > 0.0 else 1.0
+            result[index] = (
+                (float(u) - cx) * depth / fx,
+                (float(v) - cy) * depth / fy,
+                depth,
+            )
 
     ctx = get_current_trace()
     if ctx is not None:
@@ -1181,133 +1304,89 @@ def run_model_inference(
     output_dtypes: Optional[List[np.dtype]] = None,
     input_aliasing: Optional[Dict[str, str]] = None,
     output_aliasing: Optional[Dict[str, str]] = None,
-    duration: int = 20,
+    model_type: str = "tflite",
+    model: Optional[Dict[str, Any]] = None,
+    model_target: str = "npu",
+    cpu_target_num_threads: int = 1,
 ) -> Dict[str, np.ndarray]:
-    """Run a model inference using QnnModelV2 on Android device.
+    """Record a LiteRT/TFLite model inference operator.
 
     Corresponds to EOperatorType.RUN_MODEL_INFERENCE.
 
     Args:
         inputs: Dictionary of input tensors.
-        model_file: Path to the model file (.bin with corresponding .json).
+        model_file: Package-relative or local TFLite model path.
         model_name: Name of the model.
         output_names: List of output tensor names.
-        output_shapes: Optional list of output shapes.
-        output_dtypes: Optional list of output dtypes.
+        output_shapes: Required list of output shapes for trace-time placeholder tensors.
+        output_dtypes: Optional list of output dtypes. Defaults to float32.
         input_aliasing: Optional input name aliasing.
         output_aliasing: Optional output name aliasing.
-        duration: Time to wait for model_inspect APK to complete (seconds).
+        model_type: Serialized model runtime type. Only ``tflite`` is supported.
+        model: Optional inline model spec to serialize on the operator.
+        model_target: Serialized backend target for SpatialML packages.
+        cpu_target_num_threads: Serialized CPU thread count when ``model_target`` is CPU.
 
     Returns:
-        Dictionary of output tensors.
-
-    Note:
-        Requires Android device connected via ADB and model_inspect APK installed.
+        Dictionary of trace-time placeholder output tensors.
     """
-    from securemr.qnn.qnn_model_v2 import QnnModelV2
-
-    input_list = list(inputs.values())
-    if not input_list:
+    if not inputs:
         raise ValueError("run_model_inference requires at least one input tensor")
+    if model_type != "tflite":
+        raise ValueError("run_model_inference only supports LiteRT/TFLite model_type='tflite'")
+    if not model_file.endswith(".tflite"):
+        raise ValueError(f"Unsupported model format: {model_file}. Use a .tflite model file")
+    if not output_names:
+        raise ValueError("run_model_inference requires at least one output name")
+    if not output_shapes or len(output_shapes) != len(output_names):
+        raise ValueError("run_model_inference requires one output shape per output name")
 
-    # Find JSON file for the model
-    if not model_file.endswith(".bin"):
-        raise ValueError(f"Unsupported model format: {model_file}. Use .bin file for QnnModelV2")
+    output_dtypes = output_dtypes or [np.float32] * len(output_names)
+    if len(output_dtypes) != len(output_names):
+        raise ValueError("run_model_inference requires one output dtype per output name")
 
-    json_path = model_file.replace(".bin", ".json")
-    if not os.path.exists(json_path):
-        # Try alternative naming conventions
-        base_path = model_file.rsplit(".", 1)[0]
-        for suffix in [".json", "_info.json", ".serialized.json"]:
-            candidate = base_path + suffix
-            if os.path.exists(candidate):
-                json_path = candidate
-                break
-    if not os.path.exists(json_path):
-        raise FileNotFoundError(
-            f"JSON file not found for QnnModelV2. Expected: {model_file.replace('.bin', '.json')}"
-        )
-
-    # Create QnnModelV2 instance
-    output_node_ids = ",".join(output_names) if output_names else None
-    model = QnnModelV2(
-        context_binary=model_file,
-        context_binary_json=json_path,
-        output_node_ids=output_node_ids,
-        duration=duration,
-    )
-
-    # Prepare input tensor (convert HWC to NCHW)
-    input_tensor = input_list[0]
-    if input_tensor.ndim == 3:
-        # HWC -> CHW -> NCHW
-        x_np = input_tensor.transpose(2, 0, 1).astype(np.float32)
-        x_np = x_np[np.newaxis, ...]
-    elif input_tensor.ndim == 4:
-        x_np = input_tensor.astype(np.float32)
-    else:
-        raise ValueError(f"Unsupported input tensor rank: {input_tensor.ndim}")
-
-    # Run inference
-    try:
-        model_outputs = model(x_np, is_nhwc=False)
-    except Exception as e:
-        raise RuntimeError(f"QnnModelV2 inference failed: {e}")
-
-    # Handle single output case
-    if not isinstance(model_outputs, (list, tuple)):
-        model_outputs = [model_outputs]
-
-    # Build output dictionary
     outputs: Dict[str, np.ndarray] = {}
-    for idx, name in enumerate(output_names):
-        if idx < len(model_outputs):
-            arr = model_outputs[idx]
-            if hasattr(arr, "numpy"):
-                arr = arr.numpy()
-            else:
-                arr = np.asarray(arr)
+    for name, shape, dtype in zip(output_names, output_shapes, output_dtypes):
+        outputs[name] = np.zeros(tuple(shape), dtype=np.dtype(dtype))
 
-            # Reshape if needed
-            if output_shapes and idx < len(output_shapes):
-                shape = output_shapes[idx]
-                if shape and arr.shape != tuple(shape) and arr.size == int(np.prod(shape)):
-                    arr = arr.reshape(shape)
+    if model is None:
+        model = {
+            "bin_path": model_file,
+            "model_name": model_name,
+            "model_type": "tflite",
+            "model_target": model_target,
+            **({"cpu_target_num_threads": int(cpu_target_num_threads)} if model_target == "cpu" else {}),
+        }
+    else:
+        model = dict(model)
+        model.setdefault("bin_path", model_file)
+        model.setdefault("model_name", model_name)
+        model.setdefault("model_type", "tflite")
+        model.setdefault("model_target", model_target)
+        if model.get("model_target") == "cpu":
+            model.setdefault("cpu_target_num_threads", int(cpu_target_num_threads))
 
-            # Convert dtype if needed
-            if output_dtypes and idx < len(output_dtypes):
-                try:
-                    dtype = np.dtype(output_dtypes[idx])
-                    if arr.dtype != dtype:
-                        arr = arr.astype(dtype)
-                except Exception:
-                    pass
-
-            outputs[name] = arr
-
-    # Record operation for tracing
     ctx = get_current_trace()
     if ctx is not None:
-        device_model_file = None
-        try:
-            base = model_file.split("/")[-1]
-            device_model_file = (
-                "/sdcard/Android/data/com.bytedance.pico.secure_mr_demo.pipeline_inspect/files/" + base
-            )
-        except Exception:
-            device_model_file = None
+        input_refs = []
+        for alias, tensor in inputs.items():
+            tensor_name = ctx.get_tensor_name(tensor)
+            if tensor_name is not None:
+                input_refs.append({"name": alias, "tensor": tensor_name})
+        output_refs = [{"name": name, "tensor": name} for name in output_names]
         extra_info = {
-            "model_file": model_file,
-            "model_file_host": model_file,
             "model_name": model_name,
+            "model_type": model_type,
+            "model_target": model_target,
+            "cpu_target_num_threads": int(cpu_target_num_threads),
             "input_aliasing": input_aliasing or {},
             "output_aliasing": output_aliasing or {},
             "output_names": output_names,
+            "input_refs": input_refs,
+            "output_refs": output_refs,
+            "model": model,
+            "output_shapes": [tuple(shape) for shape in output_shapes],
         }
-        if device_model_file:
-            extra_info["device_model_file"] = device_model_file
-        if output_shapes:
-            extra_info["output_shapes"] = [tuple(shape) for shape in output_shapes]
         ctx.record_op(
             op_type=EOperatorType.RUN_MODEL_INFERENCE,
             attrs=[],
@@ -1340,6 +1419,7 @@ def load_texture(
             inputs=[gltf_placeholder, texture_src],
             outputs=[result],
             output_names=[output_name] if output_name else None,
+            extra_info={"gltf_input_index": 0, "texture_input_index": 1},
         )
 
     return result
@@ -1359,17 +1439,29 @@ def switch_gltf_render_status(
     ctx = get_current_trace()
     if ctx is not None:
         inputs = [gltf_placeholder]
+        input_indices = {}
         if pose is not None:
+            input_indices["pose"] = len(inputs)
             inputs.append(pose)
         if isinstance(view_locked, np.ndarray):
+            input_indices["view_locked"] = len(inputs)
             inputs.append(view_locked)
         if isinstance(visible, np.ndarray):
+            input_indices["visible"] = len(inputs)
             inputs.append(visible)
         ctx.record_op(
             op_type=EOperatorType.SWITCH_GLTF_RENDER_STATUS,
             attrs=[],
             inputs=inputs,
             outputs=[],
+            extra_info={
+                "gltf_input_index": 0,
+                "pose_input_index": input_indices.get("pose"),
+                "view_locked_input_index": input_indices.get("view_locked"),
+                "visible_input_index": input_indices.get("visible"),
+                "view_locked": bool(view_locked) if isinstance(view_locked, (bool, np.bool_)) else None,
+                "visible": bool(visible) if isinstance(visible, (bool, np.bool_)) else None,
+            },
         )
 
 
@@ -1386,11 +1478,26 @@ def update_gltf(
     _ = (gltf_placeholder, values, ids)
     ctx = get_current_trace()
     if ctx is not None:
+        inputs = [gltf_placeholder]
+        input_indices = {}
+        if values is not None:
+            input_indices["values"] = len(inputs)
+            inputs.append(values)
+        if ids is not None:
+            input_indices["ids"] = len(inputs)
+            inputs.append(ids)
         ctx.record_op(
             op_type=EOperatorType.UPDATE_GLTF,
             attrs=[update_type],
-            inputs=[gltf_placeholder],
+            inputs=inputs,
             outputs=[],
+            extra_info={
+                "update_type": update_type,
+                "attribute": update_type,
+                "gltf_input_index": 0,
+                "values_input_index": input_indices.get("values"),
+                "ids_input_index": input_indices.get("ids"),
+            },
         )
 
 
@@ -1414,12 +1521,162 @@ def render_text(
          start_position, colors, texture_id, font_size)
     ctx = get_current_trace()
     if ctx is not None:
+        inputs = [gltf_placeholder]
+        input_indices = {}
+        for name, tensor in (
+            ("start", start_position),
+            ("colors", colors),
+            ("texture_id", texture_id),
+            ("font_size", font_size),
+        ):
+            if isinstance(tensor, np.ndarray):
+                input_indices[name] = len(inputs)
+                inputs.append(tensor)
+        gltf_input_index = 0
         ctx.record_op(
             op_type=EOperatorType.RENDER_TEXT,
             attrs=[f"{typeface}#{language_and_locale}#{canvas_width}#{canvas_height}", text],
-            inputs=[gltf_placeholder],
+            inputs=inputs,
             outputs=[],
+            extra_info={
+                "text": text,
+                "language_and_locale": language_and_locale,
+                "typeface": typeface,
+                "canvas_width": int(canvas_width),
+                "canvas_height": int(canvas_height),
+                "gltf_input_index": gltf_input_index,
+                "start_input_index": input_indices.get("start"),
+                "colors_input_index": input_indices.get("colors"),
+                "texture_id_input_index": input_indices.get("texture_id"),
+                "font_size_input_index": input_indices.get("font_size"),
+                "start": None if isinstance(start_position, np.ndarray) else (
+                    [0.0, 0.0] if start_position is None else np.asarray(start_position).tolist()
+                ),
+                "colors": None if isinstance(colors, np.ndarray) else (
+                    [[255, 255, 255, 255], [0, 0, 0, 0]] if colors is None else np.asarray(colors).tolist()
+                ),
+                "texture_id": None if isinstance(texture_id, np.ndarray) else (0 if texture_id is None else int(np.asarray(texture_id).reshape(-1)[0])),
+                "font_size": None if isinstance(font_size, np.ndarray) else (16.0 if font_size is None else float(np.asarray(font_size).reshape(-1)[0])),
+            },
         )
+
+
+def scenegraph_visibility(
+    scenegraph: np.ndarray,
+    visible: Union[np.ndarray, bool] = True,
+    output_name: Optional[str] = None,
+) -> np.ndarray:
+    """Stub for scenegraph visibility updates.
+
+    Corresponds to EOperatorType.SCENEGRAPH_VISIBILITY.
+    """
+    _ = scenegraph
+    visible_value = bool(np.asarray(visible).reshape(-1)[0]) if isinstance(visible, np.ndarray) else bool(visible)
+    result = np.array([1 if visible_value else 0], dtype=np.uint8)
+
+    ctx = get_current_trace()
+    if ctx is not None:
+        ctx.record_op(
+            op_type=EOperatorType.SCENEGRAPH_VISIBILITY,
+            attrs=["true" if visible_value else "false"],
+            inputs=[scenegraph, visible] if isinstance(visible, np.ndarray) else [scenegraph],
+            outputs=[result],
+            output_names=[output_name] if output_name else None,
+            extra_info={
+                "visible_input_index": 1 if isinstance(visible, np.ndarray) else None,
+                "visible": None if isinstance(visible, np.ndarray) else visible_value,
+            },
+        )
+
+    return result
+
+
+def update_component(
+    scenegraph: np.ndarray,
+    data: np.ndarray,
+    entity_path: str,
+    property: str,
+) -> np.ndarray:
+    """Record a Spatial scene-graph component property update.
+
+    Corresponds to EOperatorType.UPDATE_COMPONENT.
+    """
+    if not entity_path.startswith("/"):
+        raise ValueError("entity_path must start with '/'")
+    if not property or not property.strip():
+        raise ValueError("property is required")
+    result = np.asarray(data).copy()
+
+    ctx = get_current_trace()
+    if ctx is not None:
+        ctx.record_op(
+            op_type=EOperatorType.UPDATE_COMPONENT,
+            attrs=[],
+            inputs=[scenegraph, data],
+            outputs=[],
+            extra_info={
+                "entity_path": entity_path,
+                "property": property,
+            },
+        )
+
+    return result
+
+
+def microphone(output_shape: tuple = (1,), output_name: Optional[str] = None) -> np.ndarray:
+    """Stub for microphone capture.
+
+    Corresponds to EOperatorType.MICROPHONE.
+    """
+    result = np.zeros(output_shape, dtype=np.float32)
+
+    ctx = get_current_trace()
+    if ctx is not None:
+        ctx.record_op(
+            op_type=EOperatorType.MICROPHONE,
+            attrs=[],
+            inputs=[],
+            outputs=[result],
+            output_names=[output_name] if output_name else None,
+        )
+
+    return result
+
+
+def speaker(audio: np.ndarray, output_name: Optional[str] = None) -> None:
+    """Stub for speaker playback.
+
+    Corresponds to EOperatorType.SPEAKER.
+    """
+    ctx = get_current_trace()
+    if ctx is not None:
+        ctx.record_op(
+            op_type=EOperatorType.SPEAKER,
+            attrs=[],
+            inputs=[audio],
+            outputs=[],
+            output_names=[],
+        )
+
+
+def depth(output_shape: tuple = (1, 1), output_name: Optional[str] = None) -> np.ndarray:
+    """Stub for depth capture.
+
+    Corresponds to EOperatorType.DEPTH.
+    """
+    result = np.zeros(output_shape, dtype=np.float32)
+
+    ctx = get_current_trace()
+    if ctx is not None:
+        ctx.record_op(
+            op_type=EOperatorType.DEPTH,
+            attrs=[],
+            inputs=[],
+            outputs=[result],
+            output_names=[output_name] if output_name else None,
+        )
+
+    return result
 
 
 class _JsArray:
@@ -1634,12 +1891,19 @@ def javascript(
 
     ctx = get_current_trace()
     if ctx is not None:
+        input_refs = []
+        for alias, tensor in inputs.items():
+            tensor_name = ctx.get_tensor_name(tensor)
+            if tensor_name is not None:
+                input_refs.append({"name": alias, "tensor": tensor_name})
+        output_refs = [{"name": name, "tensor": name} for name in output_names]
         ctx.record_op(
             op_type=_OP_JAVASCRIPT,
             attrs=[js_code],
             inputs=list(inputs.values()),
             outputs=list(outputs.values()),
             output_names=output_names,
+            extra_info={"input_refs": input_refs, "output_refs": output_refs},
         )
 
     return outputs

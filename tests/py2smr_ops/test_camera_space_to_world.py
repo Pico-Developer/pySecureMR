@@ -59,6 +59,7 @@ class TestCameraSpaceToWorld:
         np.testing.assert_allclose(result[1], expected_left, rtol=1e-5, atol=1e-5)
 
         spec = convert(ctx)
+        assert spec["operators"][0]["outputs"] == ["right", "left"]
         verification = verify(
             pipeline=spec,
             inputs={"timestamp": timestamp},
@@ -86,5 +87,9 @@ class TestCameraSpaceToWorld:
             device=True,
             duration=30,
         )
+        if verification.error_message == "Device verification is not available":
+            import pytest
+
+            pytest.skip("Python verifier device execution is not available")
 
         assert verification.success, verification.error_message

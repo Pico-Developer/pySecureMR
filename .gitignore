@@ -33,6 +33,9 @@ build/
 **/*.pth.tar
 **/*.pkl
 **/*.xml
+!pyspatialml/xr_pipeline_runner/app/src/main/AndroidManifest.xml
+!pyspatialml/spatial_pipeline_runner/app/src/main/AndroidManifest.xml
+!pyspatialml/spatial_pipeline_runner/app/src/main/res/**/*.xml
 **/*.pt
 **/*.hbir
 **/*.dot

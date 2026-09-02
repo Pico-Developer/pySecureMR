@@ -19,6 +19,7 @@ def test_swap_hwc_chw_host():
     )
     assert verification.success
     assert result.shape == (4, 2, 3)
+    np.testing.assert_array_equal(result, np.transpose(tensor, (2, 0, 1)))
 
 
 @skip_if_no_device

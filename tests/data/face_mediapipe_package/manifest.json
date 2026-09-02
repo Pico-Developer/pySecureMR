@@ -1,0 +1,15 @@
+{
+  "schema_version": "2",
+  "id": "face-test",
+  "pipelines": [
+    {
+      "id": "detection",
+      "path": "pipeline/face_detection_pipeline.json"
+    }
+  ],
+  "runtime": {
+    "supported_modes": [
+      "spatial"
+    ]
+  }
+}

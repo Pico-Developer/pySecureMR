@@ -1,12 +1,21 @@
 include LICENSE
 include License.md
-include securemr/_bindings/libopencv_calib3d.so.3.4
-include securemr/_bindings/libopencv_core.so.3.4
-include securemr/_bindings/libopencv_flann.so.3.4
-include securemr/_bindings/libopencv_imgcodecs.so.3.4
-include securemr/_bindings/libopencv_imgproc.so.3.4
-include securemr/_bindings/libopenmr-backend.so
-include securemr/_bindings/libSNPE.so
-include securemr/_bindings/_securemr.cpython-310-x86_64-linux-gnu.so
-include securemr/inspect/apks/model_inspect-debug.apk
-include securemr/inspect/apks/pipeline_inspect-debug.apk
+include pyspatialml/apks/pyspatialml_xr_runner-debug.apk
+include pyspatialml/apks/pyspatialml_spatial_runner-debug.apk
+include securemr/license_header.txt
+recursive-include securemr/viz *.js
+recursive-include pyspatialml/xr_pipeline_runner/scripts *.py
+recursive-include pyspatialml/spatial_pipeline_runner/scripts *.py
+prune pyspatialml/spatial_pipeline_runner/.gradle
+prune pyspatialml/spatial_pipeline_runner/.kotlin
+prune pyspatialml/spatial_pipeline_runner/app/build
+prune pyspatialml/xr_pipeline_runner/.gradle
+prune pyspatialml/xr_pipeline_runner/.kotlin
+prune pyspatialml/xr_pipeline_runner/app/build
+prune tests
+prune examples
+prune external
+prune scripts
+prune skills
+global-exclude __pycache__
+global-exclude *.py[cod]

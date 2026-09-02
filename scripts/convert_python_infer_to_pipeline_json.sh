@@ -1,5 +1,5 @@
 python_code="infer_cards_onnx.py"
-pysecuremr="/Users/duino/code/securemr/pySecureMR"
+pyspatialml="/Users/duino/code/securemr/pySpatialML"
 
 echo "
 # Goal（一句话）
@@ -8,9 +8,9 @@ echo "
 务必使用spatialml skill
 
 # Inputs（路径 / repo / 版本）
-1. pysecuremr: ${pysecuremr}
-2. mnistwild.py: ${pysecuremr}/examples/mnistwild/mnistwild.py
-3. spatialml skill: ${pysecuremr}/skills/spatialml/SKILL.md
+1. pyspatialml: ${pyspatialml}
+2. mnistwild.py: ${pyspatialml}/examples/mnistwild/mnistwild.py
+3. spatialml skill: ${pyspatialml}/skills/spatialml/SKILL.md
 4. 使用.venv环境运行python程序
 
 # Non-goals（明确不做什么）
@@ -32,7 +32,7 @@ echo "
 10. 如果存在始终无法实现的operator，就把这个operator之前的所有operator用securemr operator实现保存到json.
 
 # Done（可自动验证）
-1. python ${python_code} 运行的结果，和利用pipeline inspect工具(python -m securemr.inspect.pipeline_cli)得到的结果，数值一致。
+1. python ${python_code} 运行的结果，和利用pyspatialml run host/device得到的结果，数值一致。
 2. 保存两个可视化结果。
 
 确保直到done条件完成了，才可以停止任务。

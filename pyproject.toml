@@ -1,21 +1,39 @@
 [build-system]
-requires = ["setuptools>=45", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "securemr"
+name = "pyspatialml-pico"
 dynamic = ["version"]
-description = "Python bindings for SecureMR."
+description = "SpatialML package and LiteRT/TFLite workflow tools."
 readme = "README.md"
-license = {file = "LICENSE"}
-requires-python = ">=3.10.*"
+license = "MIT"
+license-files = ["LICENSE", "License.md"]
+requires-python = ">=3.13"
 dependencies = [
+  "ai-edge-litert==2.1.5",
+  "litert-cli==0.1.0",
   "numpy",
   "opencv-python",
   "pure-python-adb",
 ]
+keywords = ["spatialml", "securemr", "litert", "tflite", "pico"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Software Development :: Build Tools",
+]
 
 [project.optional-dependencies]
+examples = [
+  "onnxruntime",
+]
 test = [
   "coverage",
   "pytest",
@@ -49,21 +67,44 @@ name = "bingwen.ai"
 email = "bingwen.ai@bytedance.com"
 
 [project.urls]
-repository = "https://github.com/Pico-Developer/pySecureMR"
+Homepage = "https://github.com/Pico-Developer/pySpatialML"
+Repository = "https://github.com/Pico-Developer/pySpatialML"
+Issues = "https://github.com/Pico-Developer/pySpatialML/issues"
+
+[project.scripts]
+pyspatialml = "pyspatialml.cli:main"
 
 [tool.setuptools]
 zip-safe = false
 include-package-data = true
-packages = {find = {}}
+
+[tool.setuptools.packages.find]
+include = ["pyspatialml*", "securemr*"]
+exclude = ["tests*", "examples*", "external*", "scripts*", "skills*"]
+
+[tool.setuptools.package-data]
+pyspatialml = [
+  "apks/*.apk",
+  "spatial_pipeline_runner/scripts/*.py",
+  "xr_pipeline_runner/scripts/*.py",
+]
+securemr = [
+  "license_header.txt",
+  "viz/*.js",
+]
 
 [tool.setuptools.dynamic]
 version = {attr = "securemr.__version__"}
 
 [tool.pytest.ini_options]
+testpaths = [
+    "tests",
+]
 norecursedirs = [
     ".git",
     "dist",
     "build",
+    ".cxx",
 ]
 python_files = ["test_*.py"]
 addopts = [

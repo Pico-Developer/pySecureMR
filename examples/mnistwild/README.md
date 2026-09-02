@@ -7,7 +7,7 @@ This sample demonstrates how to take a high-resolution street photo that contain
 - Builds an affine transform to crop the digit (224×224 region of interest) and ensures the image matches the expected capture resolution.
 - Converts the crop to grayscale, casts to `float32`, and normalizes pixel values to the `[0, 1]` range.
 - Serializes the preprocessing graph as a SecureMR `Pipeline`, saves it to `mnist_pipeline.json`, and verifies the pipeline by comparing tensor outputs with an imperative implementation.
-- Restores the serialized pipeline, runs a QNN MNIST classifier (`mnist.serialized.bin`), and appends both a Virtual Sensor Twin (VST) operator and the model inference operator back into the pipeline so the full flow can be exported.
+- Restores the serialized pipeline and appends both a Virtual Sensor Twin (VST) operator and a LiteRT/TFLite model inference operator with inline schema v2 metadata so the full flow can be exported.
 
 ## Processing pipeline
 1. `GET_AFFINE` computes the warp matrix from the source crop points.
@@ -20,11 +20,11 @@ This sample demonstrates how to take a high-resolution street photo that contain
 
 ## Running the example
 ```bash
-cd pySecureMR/examples/mnistwild
+cd pySpatialML/examples/mnistwild
 python mnistwild.py
 ```
 
-Successful execution prints the predicted class and confidence for `number_5.png`, and emits an updated `mnist_pipeline.json` that contains the VST and model inference nodes.
+Successful execution emits an updated `mnist_pipeline.json` that contains the VST and model inference nodes.
 
 ## Pipeline visualization
 The rendered graph below mirrors the operators described above.
@@ -32,7 +32,7 @@ The rendered graph below mirrors the operators described above.
 ![](./mnist_pipeline_vis.png)
 
 ## Key files
-- `mnistwild.py`: Imperative preprocessing, pipeline construction, and inference script.
+- `mnistwild.py`: Imperative preprocessing and pipeline construction script.
 - `mnist_pipeline.json`: Serialized SecureMR pipeline with VST and MNIST inference operators.
-- `mnist.serialized.bin`: MNIST classification model in QNN context binary format.
+- `model/mnist.tflite`: Package-relative MNIST classification model path referenced by the generated pipeline.
 - `number_5.png`: Sample capture used to drive the example (see also `number_2.png` for experimentation).

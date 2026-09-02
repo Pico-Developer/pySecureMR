@@ -2,7 +2,7 @@ SecureMR_Samples=/Users/duino/ws/yunhao_publish/SecureMR_Samples
 
 echo "
 # Goal（一句话）
-根据SecureMR_Samples的operator和openxr，更新pysecuremr的EOperatorType，以及spatialml skill中的pipeline spec.
+根据SecureMR_Samples的operator和openxr，更新pyspatialml的EOperatorType，以及spatialml skill中的pipeline spec.
 
 # Inputs（路径 / repo / 版本）
 1. SecureMR_Samples: ${SecureMR_Samples}

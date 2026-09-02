@@ -20,19 +20,50 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
 
 from securemr.core.types import EOperatorType
-from securemr.core.utils import convert_to_dtype
+from securemr.core.utils import TensorType, convert_to_dtype
 
-__all__ = ["verify", "VerificationResult", "compare_outputs", "run_pipeline_python"]
+__all__ = [
+    "verify",
+    "VerificationResult",
+    "compare_outputs",
+    "run_pipeline_python",
+    "validate_pipeline_spec",
+]
 
 _OP_GET_TRANSFORM_MAT = getattr(EOperatorType, "GET_TRANSFORM_MAT", getattr(EOperatorType, "MAKE_TRANSFORM_MAT", None))
 _OP_LOAD_TEXTURE = getattr(EOperatorType, "LOAD_TEXTURE", getattr(EOperatorType, "UPLOAD_TEXTURE_TO_GLTF", None))
 _OP_SWAP_HWC_CHW = getattr(EOperatorType, "SWAP_HWC_CHW", getattr(EOperatorType, "CHW_HWC", None))
 _OP_JAVASCRIPT = getattr(EOperatorType, "JAVASCRIPT", getattr(EOperatorType, "JS_SCRIPTING", None))
+
+_OPERATOR_TYPE_ALIASES = {
+    "ARITHMETIC": "ARITHMETIC_COMPOSE",
+    "CAMERA_ACCESS": "RECTIFIED_VST_ACCESS",
+    "CAM_SPACE_TO_XR_LOCAL": "CAMERA_SPACE_TO_WORLD",
+    "COMPARE_TO": "CUSTOMIZED_COMPARE",
+    "CVT_COLOR": "CONVERT_COLOR",
+    "DRAW_TEXT": "RENDER_TEXT",
+    "ELEMENTWISE": "ELEMENTWISE_MULTIPLY",
+    "GET_TRANSFORM_MATRIX": "GET_TRANSFORM_MAT",
+    "JS_SCRIPTING": "JAVASCRIPT",
+    "MAKE_TRANSFORM_MAT": "GET_TRANSFORM_MAT",
+    "NON_MAXIMUM_SUPPRESSION": "NMS",
+    "RENDER_GLTF": "SWITCH_GLTF_RENDER_STATUS",
+    "RUN_ALGORITHM": "RUN_MODEL_INFERENCE",
+    "SOLVE_PNP": "SOLVE_P_N_P",
+    "SORT_MATRIX": "SORT_MAT",
+    "SORT_VECTOR": "SORT_VEC",
+    "TRANSFORM": "GET_TRANSFORM_MAT",
+    "TYPE_CONVERT": "ASSIGNMENT",
+    "UPLOAD_TEXTURE_TO_GLTF": "LOAD_TEXTURE",
+    "UV2_CAM": "UV_TO_3D_IN_CAM_SPACE",
+    "UV_TO_3D_IN_CAMERA_SPACE": "UV_TO_3D_IN_CAM_SPACE",
+    "CHW_HWC": "SWAP_HWC_CHW",
+}
 
 
 @dataclass
@@ -44,6 +75,110 @@ class VerificationResult:
     max_abs_diff: Optional[Dict[str, float]] = None
     max_rel_diff: Optional[Dict[str, float]] = None
     error_message: Optional[str] = None
+
+
+def _is_matrix_tensor(tensor_spec: Dict[str, Any]) -> bool:
+    """Return True when a tensor descriptor declares MAT/matrix usage."""
+    tensor_type = tensor_spec.get("tensor_type") or tensor_spec.get("type")
+    if tensor_type is not None:
+        normalized = str(tensor_type).strip().lower().replace("-", "_")
+        if normalized in {"matrix", "mat"}:
+            return True
+
+    usage = tensor_spec.get("usage")
+    if usage is None:
+        return False
+
+    if isinstance(usage, str):
+        normalized = usage.strip().lower().replace("-", "_")
+        if normalized in {"matrix", "mat"}:
+            return True
+        try:
+            usage = int(usage, 0)
+        except ValueError:
+            return False
+
+    try:
+        return int(usage) == int(TensorType.MAT.value)
+    except (TypeError, ValueError):
+        return False
+
+
+def _tensor_dimensions_and_channels(tensor_spec: Dict[str, Any]) -> tuple[List[int], int]:
+    dimensions = tensor_spec.get("dimensions", [])
+    if not isinstance(dimensions, list):
+        dimensions = []
+    dims = [int(dim) for dim in dimensions]
+    channels = int(tensor_spec.get("channels", 1) or 1)
+    return dims, channels
+
+
+def _validate_swap_hwc_chw_operator(
+    op_spec: Dict[str, Any],
+    tensor_specs: Dict[str, Any],
+) -> None:
+    input_refs = op_spec.get("inputs", [])
+    output_refs = op_spec.get("outputs", [])
+    if len(input_refs) != 1 or len(output_refs) != 1:
+        raise ValueError("swap_hwc_chw requires exactly one input and one output tensor")
+
+    input_name = _resolve_tensor_name(input_refs[0])
+    output_name = _resolve_tensor_name(output_refs[0])
+    input_spec = tensor_specs.get(input_name or "")
+    output_spec = tensor_specs.get(output_name or "")
+    if input_spec is None or output_spec is None:
+        return
+
+    input_dims, input_channels = _tensor_dimensions_and_channels(input_spec)
+    output_dims, output_channels = _tensor_dimensions_and_channels(output_spec)
+    if len(input_dims) != 2:
+        raise ValueError(
+            f"swap_hwc_chw input '{input_name}' must be a 3D matrix encoded as "
+            "2 dimensions plus channels"
+        )
+
+    if input_channels <= 4:
+        expected_dims = [input_channels, input_dims[0]]
+        expected_channels = input_dims[1]
+    else:
+        expected_dims = [input_dims[1], input_channels]
+        expected_channels = input_dims[0]
+
+    if output_dims != expected_dims or output_channels != expected_channels:
+        raise ValueError(
+            f"swap_hwc_chw output '{output_name}' has dimensions {output_dims} "
+            f"and channels {output_channels}, expected dimensions {expected_dims} "
+            f"and channels {expected_channels} for input '{input_name}'"
+        )
+
+
+def validate_pipeline_spec(spec: Dict[str, Any]) -> None:
+    """Validate pipeline JSON rules that must match the native runtime.
+
+    Raises:
+        ValueError: If the pipeline spec contains an invalid tensor descriptor.
+    """
+    for name, tensor_spec in spec.get("tensors", {}).items():
+        if not isinstance(tensor_spec, dict):
+            continue
+        if not _is_matrix_tensor(tensor_spec):
+            continue
+
+        dimensions = tensor_spec.get("dimensions", [])
+        if not isinstance(dimensions, list) or len(dimensions) < 2:
+            raise ValueError(
+                f"Tensor '{name}' is declared as matrix/MAT usage but has "
+                f"dimensions {dimensions!r}; matrix tensors must have at least "
+                "2 dimensions. Use [1, N] or [N, 1] for vectors, or use a "
+                "scalar/point tensor type for 1D data."
+            )
+
+    tensor_specs = spec.get("tensors", {})
+    for op_spec in spec.get("operators", []):
+        if not isinstance(op_spec, dict):
+            continue
+        if _OP_SWAP_HWC_CHW is not None and _get_operator_type(op_spec.get("type", "")) == _OP_SWAP_HWC_CHW:
+            _validate_swap_hwc_chw_operator(op_spec, tensor_specs)
 
 
 def compare_outputs(
@@ -137,6 +272,10 @@ def _run_host_pipeline(
 def run_pipeline_python(
     spec: Dict[str, Any],
     inputs: Dict[str, np.ndarray],
+    *,
+    return_all_tensors: bool = False,
+    model_runner=None,
+    custom_operator_handler: Optional[Callable[..., bool]] = None,
 ) -> Dict[str, np.ndarray]:
     """Execute a pipeline spec using pure Python (no native bindings).
 
@@ -145,12 +284,21 @@ def run_pipeline_python(
         inputs: Dictionary of input tensors.
 
     Returns:
-        Dictionary of output tensors.
+        Dictionary of output tensors by default. When ``return_all_tensors`` is
+        true, returns every tensor available after execution.
+
+    ``custom_operator_handler`` receives ``(op_spec, input_tensors,
+    output_names, tensors)`` for an unrecognized operator. It must populate
+    any outputs in ``tensors`` and return ``True`` when it handled the
+    operator.
     """
     from . import ops
 
+    validate_pipeline_spec(spec)
+
     # Initialize tensor storage with inputs
     tensors: Dict[str, np.ndarray] = dict(inputs)
+    protected_inputs = set(inputs.keys())
 
     # Load pre-defined tensor values from spec
     for name, tensor_spec in spec.get("tensors", {}).items():
@@ -173,7 +321,15 @@ def run_pipeline_python(
     # Execute operators in order
     tensor_specs = spec.get("tensors", {})
     for op_spec in spec.get("operators", []):
-        _execute_operator(op_spec, tensors, ops, tensor_specs=tensor_specs)
+        _execute_operator(
+            op_spec,
+            tensors,
+            ops,
+            tensor_specs=tensor_specs,
+            protected_inputs=protected_inputs,
+            model_runner=model_runner,
+            custom_operator_handler=custom_operator_handler,
+        )
 
     # Collect outputs
     output_names = spec.get("outputs", [])
@@ -182,7 +338,7 @@ def run_pipeline_python(
         if name in tensors:
             outputs[name] = tensors[name]
 
-    return outputs
+    return tensors if return_all_tensors else outputs
 
 
 def _resolve_tensor_name(ref: Any) -> Optional[str]:
@@ -194,6 +350,87 @@ def _resolve_tensor_name(ref: Any) -> Optional[str]:
     return None
 
 
+def _split_tensor_slice(name: str) -> tuple[str, Optional[List[List[Optional[int]]]]]:
+    if "[" not in name or not name.endswith("]"):
+        return name, None
+    tensor_name = name[: name.index("[")]
+    raw = name[name.index("[") + 1 : -1]
+    slices: List[List[Optional[int]]] = []
+    for part in raw.split(","):
+        items = [item.strip() for item in part.split(":")]
+        if len(items) < 2:
+            index = int(items[0])
+            slices.append([index, index + 1])
+        else:
+            if len(items) > 3:
+                raise ValueError(f"Invalid tensor slice: {name}")
+            start = int(items[0]) if items[0] else None
+            end = int(items[1]) if items[1] else None
+            descriptor: List[Optional[int]] = [start, end]
+            if len(items) == 3:
+                descriptor.append(int(items[2]) if items[2] else None)
+            slices.append(descriptor)
+    return tensor_name, slices
+
+
+def _tensor_from_ref(ref: Any, tensors: Dict[str, np.ndarray]) -> Optional[np.ndarray]:
+    name = _resolve_tensor_name(ref)
+    if not name:
+        return None
+    tensor_name, slices = _split_tensor_slice(name)
+    if tensor_name not in tensors:
+        return None
+    value = tensors[tensor_name]
+    if slices is None:
+        return value
+    index = []
+    for descriptor in slices:
+        if len(descriptor) == 1:
+            index.append(int(descriptor[0]))
+        else:
+            start, end = descriptor[0], descriptor[1]
+            step = descriptor[2] if len(descriptor) == 3 else None
+            index.append(slice(start, end, step))
+    return value[tuple(index)]
+
+
+def _resolve_assignment_slice(
+    value: Any,
+    tensors: Dict[str, np.ndarray],
+    field: str,
+) -> Optional[List[List[int]]]:
+    """Resolve an inline or tensor-backed slice descriptor."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        resolved = tensors.get(_resolve_tensor_name(value) or "")
+        if resolved is None:
+            raise ValueError(f"{field} references missing tensor '{value}'")
+        value = resolved
+    array = np.asarray(value)
+    if array.ndim == 0:
+        raise ValueError(f"{field} must contain slice descriptors")
+    if array.ndim == 1:
+        array = array.reshape(1, -1)
+    if array.ndim != 2 or array.shape[1] not in (2, 3):
+        raise ValueError(f"{field} must have shape [rank, 2] or [rank, 3]")
+    return [[int(item) for item in row] for row in array.tolist()]
+
+
+def _resolve_channel_slice(value: Any, tensors: Dict[str, np.ndarray], field: str) -> Optional[List[int]]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        resolved = tensors.get(_resolve_tensor_name(value) or "")
+        if resolved is None:
+            raise ValueError(f"{field} references missing tensor '{value}'")
+        value = resolved
+    result = [int(item) for item in np.asarray(value).reshape(-1).tolist()]
+    if len(result) not in (2, 3):
+        raise ValueError(f"{field} must contain 2 or 3 integers")
+    return result
+
+
 def _get_operator_type(type_str: str) -> Optional[EOperatorType]:
     """Convert operator type string to EOperatorType enum."""
     # Normalize the type string
@@ -202,6 +439,7 @@ def _get_operator_type(type_str: str) -> Optional[EOperatorType]:
         normalized = normalized[len("XR_SECURE_MR_OPERATOR_TYPE_"):]
     if normalized.endswith("_PICO"):
         normalized = normalized[:-len("_PICO")]
+    normalized = _OPERATOR_TYPE_ALIASES.get(normalized, normalized)
 
     # Try to get the enum member by name
     try:
@@ -227,6 +465,9 @@ def _execute_operator(
     tensors: Dict[str, np.ndarray],
     ops_module,
     tensor_specs: Optional[Dict[str, Any]] = None,
+    protected_inputs: Optional[set[str]] = None,
+    model_runner=None,
+    custom_operator_handler: Optional[Callable[..., bool]] = None,
 ) -> None:
     """Execute a single operator.
 
@@ -236,21 +477,29 @@ def _execute_operator(
         ops_module: The ops module containing operation implementations.
     """
     op_type = _get_operator_type(op_spec.get("type", ""))
-    if op_type is None:
-        raise ValueError(f"Unknown operator type: {op_spec.get('type')}")
 
     # Get input tensors
     input_refs = op_spec.get("inputs", [])
     input_tensors = []
     for ref in input_refs:
-        name = _resolve_tensor_name(ref)
-        if name and name in tensors:
-            input_tensors.append(tensors[name])
+        value = _tensor_from_ref(ref, tensors)
+        if value is not None:
+            input_tensors.append(value)
 
     # Get output names
     output_refs = op_spec.get("outputs", [])
     output_names = [_resolve_tensor_name(ref) for ref in output_refs]
     output_names = [n for n in output_names if n]
+
+    if op_type is None:
+        handled = bool(custom_operator_handler and custom_operator_handler(
+            op_spec, input_tensors, output_names, tensors
+        ))
+        if not handled:
+            raise ValueError(
+                f"Unknown operator type '{op_spec.get('type')}' has no registered Python custom handler"
+            )
+        return
 
     def get_output_shape(name: Optional[str]) -> Optional[tuple]:
         if not name or not tensor_specs:
@@ -261,20 +510,47 @@ def _execute_operator(
         dims = spec.get("dimensions", [])
         channels = int(spec.get("channels", 1))
         if len(dims) >= 2:
-            width, height = int(dims[0]), int(dims[1])
+            # Schema dimensions use image order: [height, width].  Keep the
+            # same order when reconstructing host output shapes; swapping
+            # these values only shows up for non-square tensors.
+            height, width = int(dims[0]), int(dims[1])
         elif len(dims) == 1:
-            width, height = int(dims[0]), 1
+            height, width = int(dims[0]), 1
         else:
-            width, height = 1, 1
+            height, width = 1, 1
         if channels > 1:
             return (height, width, channels)
         return (height, width)
+
+    def named_tensor(field: str, index: int = 0) -> Optional[np.ndarray]:
+        name = op_spec.get(field)
+        if name is None and index < len(input_refs):
+            name = input_refs[index]
+        resolved = _resolve_tensor_name(name) if name is not None else None
+        return tensors.get(resolved) if resolved is not None else None
+
+    def named_or_value(field: str, index: Optional[int] = None) -> Any:
+        """Resolve a named tensor field while preserving scalar fields."""
+        value = op_spec.get(field)
+        if isinstance(value, str):
+            resolved = _resolve_tensor_name(value)
+            if resolved is not None and resolved in tensors:
+                return tensors[resolved]
+        elif value is not None:
+            return value
+        return named_tensor(field, index) if index is not None else None
+
+    def first_tensor(*values: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        for value in values:
+            if value is not None:
+                return value
+        return None
 
     # Execute based on operator type
     if op_type == EOperatorType.ARITHMETIC_COMPOSE:
         expression = op_spec.get("expression") or op_spec.get("attrs", [""])[0]
         if input_tensors:
-            result = ops_module.arithmetic(input_tensors[0], expression)
+            result = ops_module.arithmetic(input_tensors if len(input_tensors) > 1 else input_tensors[0], expression)
             if output_names:
                 tensors[output_names[0]] = result
 
@@ -290,7 +566,13 @@ def _execute_operator(
 
     elif op_type == EOperatorType.NORMALIZE:
         if input_tensors:
-            result = ops_module.normalize(input_tensors[0])
+            attrs = op_spec.get("attrs", [])
+            normalize_type = (
+                op_spec.get("normalize_type")
+                or op_spec.get("norm_type")
+                or (attrs[0] if attrs else "L2")
+            )
+            result = ops_module.normalize(input_tensors[0], normalize_type=str(normalize_type))
             if output_names:
                 tensors[output_names[0]] = result
 
@@ -318,7 +600,17 @@ def _execute_operator(
 
     elif op_type == EOperatorType.ELEMENTWISE_MULTIPLY:
         if len(input_tensors) >= 2:
-            result = ops_module.elementwise_multiply(input_tensors[0], input_tensors[1])
+            elementwise_op = str(op_spec.get("op") or "multiply").lower()
+            if elementwise_op == "min":
+                result = ops_module.elementwise_min(input_tensors[0], input_tensors[1])
+            elif elementwise_op == "max":
+                result = ops_module.elementwise_max(input_tensors[0], input_tensors[1])
+            elif elementwise_op == "or":
+                result = ops_module.elementwise_or(input_tensors[0], input_tensors[1])
+            elif elementwise_op == "and":
+                result = ops_module.elementwise_and(input_tensors[0], input_tensors[1])
+            else:
+                result = ops_module.elementwise_multiply(input_tensors[0], input_tensors[1])
             if output_names:
                 tensors[output_names[0]] = result
     elif op_type == EOperatorType.ELEMENTWISE_OR:
@@ -345,21 +637,75 @@ def _execute_operator(
                 tensors[output_names[0]] = result
 
     elif op_type == EOperatorType.ASSIGNMENT:
-        src_slices = op_spec.get("src_slices")
-        dst_slices = op_spec.get("dst_slices")
+        src_slices = _resolve_assignment_slice(op_spec.get("src_slices_tensor"), tensors, "src_slices_tensor")
+        if src_slices is None:
+            src_slices = _resolve_assignment_slice(op_spec.get("src_slices"), tensors, "src_slices")
+        dst_slices = _resolve_assignment_slice(op_spec.get("dst_slices_tensor"), tensors, "dst_slices_tensor")
+        if dst_slices is None:
+            dst_slices = _resolve_assignment_slice(op_spec.get("dst_slices"), tensors, "dst_slices")
+        src_channel_slice = _resolve_channel_slice(op_spec.get("src_channel_slice"), tensors, "src_channel_slice")
+        dst_channel_slice = _resolve_channel_slice(op_spec.get("dst_channel_slice"), tensors, "dst_channel_slice")
+        output_base_name = output_names[0] if output_names else None
+        output_slice = None
+        if output_base_name:
+            output_base_name, output_slice = _split_tensor_slice(output_base_name)
+            if dst_slices is None and output_slice is not None:
+                dst_slices = output_slice
         if len(input_tensors) >= 2:
             result = ops_module.assignment(
                 input_tensors[0],
                 input_tensors[1],
                 src_slices=src_slices,
                 dst_slices=dst_slices,
+                src_channel_slice=src_channel_slice,
+                dst_channel_slice=dst_channel_slice,
             )
-            if output_names:
-                tensors[output_names[0]] = result
+            if output_base_name:
+                tensors[output_base_name] = result
         elif len(input_tensors) == 1:
-            # Simple copy/type conversion
-            if output_names:
-                tensors[output_names[0]] = input_tensors[0].copy()
+            if output_base_name:
+                if dst_slices is not None or dst_channel_slice is not None:
+                    dst_spec = tensor_specs.get(output_base_name, {}) if tensor_specs else {}
+                    dst = tensors.get(output_base_name)
+                    if dst is None:
+                        shape = get_output_shape(output_base_name) or input_tensors[0].shape
+                        data_type = dst_spec.get("data_type", 6) if isinstance(dst_spec, dict) else 6
+                        try:
+                            dtype = convert_to_dtype(data_type, target="numpy")
+                        except Exception:
+                            dtype = input_tensors[0].dtype
+                        dst = np.zeros(shape, dtype=dtype)
+                    tensors[output_base_name] = ops_module.assignment(
+                        input_tensors[0], dst,
+                        src_slices=src_slices,
+                        dst_slices=dst_slices,
+                        src_channel_slice=src_channel_slice,
+                        dst_channel_slice=dst_channel_slice,
+                    )
+                else:
+                    if src_slices is not None or src_channel_slice is not None:
+                        tensors[output_base_name] = ops_module.assignment(
+                            input_tensors[0], input_tensors[0],
+                            src_slices=src_slices,
+                            src_channel_slice=src_channel_slice,
+                        )
+                    else:
+                        input_name = _resolve_tensor_name(input_refs[0]) if input_refs else None
+                        input_spec = tensor_specs.get(input_name, {}) if tensor_specs and input_name else {}
+                        output_spec = tensor_specs.get(output_base_name, {}) if tensor_specs else {}
+                        input_data_type = input_spec.get("data_type") if isinstance(input_spec, dict) else None
+                        output_data_type = output_spec.get("data_type") if isinstance(output_spec, dict) else None
+                        if input_data_type != output_data_type and output_data_type is not None:
+                            try:
+                                output_dtype = convert_to_dtype(output_data_type, target="numpy")
+                            except Exception as exc:
+                                raise ValueError(
+                                    f"assignment/type_convert output '{output_base_name}' has unsupported data_type "
+                                    f"{output_data_type!r}"
+                                ) from exc
+                            tensors[output_base_name] = input_tensors[0].astype(output_dtype, copy=True)
+                        else:
+                            tensors[output_base_name] = input_tensors[0].copy()
 
     elif op_type == EOperatorType.APPLY_AFFINE:
         if len(input_tensors) >= 2:
@@ -381,7 +727,9 @@ def _execute_operator(
                 tensors[output_names[0]] = result
 
     elif op_type == EOperatorType.CUSTOMIZED_COMPARE:
-        compare = op_spec.get("compare")
+        # ``comparison`` is the schema spelling; ``compare`` is the active
+        # native spelling and remains a compatibility fallback.
+        compare = op_spec.get("comparison") or op_spec.get("compare")
         if compare is None:
             attrs = op_spec.get("attrs", [])
             compare = attrs[0] if attrs else "=="
@@ -438,8 +786,9 @@ def _execute_operator(
 
     elif op_type == EOperatorType.NORM:
         norm_type = "L2"
+        norm_type = str(op_spec.get("norm_type") or op_spec.get("normalize_type") or norm_type)
         attrs = op_spec.get("attrs", [])
-        if attrs:
+        if attrs and not op_spec.get("norm_type") and not op_spec.get("normalize_type"):
             norm_type = str(attrs[0])
         if input_tensors:
             result = ops_module.norm(input_tensors[0], norm_type=norm_type)
@@ -465,9 +814,9 @@ def _execute_operator(
                     tensors[output_names[1]] = indices
 
     elif op_type == EOperatorType.SORT_MAT:
-        sort_axis = op_spec.get("axis") or "ROW"
+        sort_axis = op_spec.get("mode") or op_spec.get("axis") or op_spec.get("sort_type") or "ROW"
         attrs = op_spec.get("attrs", [])
-        if attrs:
+        if not (op_spec.get("mode") or op_spec.get("axis") or op_spec.get("sort_type")) and attrs:
             sort_axis = str(attrs[0])
         if input_tensors:
             sorted_mat, indices = ops_module.sort_mat(input_tensors[0], axis=sort_axis)
@@ -517,20 +866,25 @@ def _execute_operator(
             image_path=op_spec.get("image_path"),
         )
         if output_names:
-            if len(output_names) >= 1:
+            protected_inputs = protected_inputs or set()
+            if len(output_names) >= 1 and output_names[0] not in protected_inputs:
                 tensors[output_names[0]] = right
-            if len(output_names) >= 2:
+            if len(output_names) >= 2 and output_names[1] not in protected_inputs:
                 tensors[output_names[1]] = left
-            if len(output_names) >= 3:
+            if len(output_names) >= 3 and output_names[2] not in protected_inputs:
                 tensors[output_names[2]] = timestamp
-            if len(output_names) >= 4:
+            if len(output_names) >= 4 and output_names[3] not in protected_inputs:
                 tensors[output_names[3]] = cam_mat
 
     elif op_type == EOperatorType.RUN_MODEL_INFERENCE:
-        model_file = op_spec.get("model_file_host") or op_spec.get("model_file") or op_spec.get("model")
-        model_name = op_spec.get("model_name", "model")
+        model_ref = op_spec.get("model")
+        inline_model = model_ref if isinstance(model_ref, dict) else {}
+        model_file = inline_model.get("bin_path")
+        model_name = op_spec.get("model_name") or inline_model.get("model_name") or "model"
         if not model_file:
-            raise ValueError("RUN_MODEL_INFERENCE requires model_file")
+            raise ValueError(
+                "RUN_MODEL_INFERENCE requires inline TFLite model metadata with model.bin_path"
+            )
         inputs_map: Dict[str, np.ndarray] = {}
         for ref in input_refs:
             if isinstance(ref, dict) and "name" in ref and "tensor" in ref:
@@ -561,16 +915,30 @@ def _execute_operator(
                     dtype = None
             output_dtypes.append(dtype if dtype is not None else np.float32)
 
-        outputs = ops_module.run_model_inference(
-            inputs=inputs_map,
-            model_file=model_file,
-            model_name=model_name,
-            output_names=output_names,
-            output_shapes=output_shapes if output_shapes else None,
-            output_dtypes=output_dtypes if output_dtypes else None,
-            input_aliasing=op_spec.get("input_aliasing", {}),
-            output_aliasing=op_spec.get("output_aliasing", {}),
-        )
+        if model_runner is not None:
+            outputs = model_runner(
+                inputs=inputs_map,
+                model_file=model_file,
+                model_name=model_name,
+                output_names=output_names,
+                output_shapes=output_shapes if output_shapes else None,
+                output_dtypes=output_dtypes if output_dtypes else None,
+                input_aliasing=op_spec.get("input_aliasing", {}),
+                output_aliasing=op_spec.get("output_aliasing", {}),
+                model=inline_model,
+            )
+        else:
+            outputs = ops_module.run_model_inference(
+                inputs=inputs_map,
+                model_file=model_file,
+                model_name=model_name,
+                output_names=output_names,
+                output_shapes=output_shapes if output_shapes else None,
+                output_dtypes=output_dtypes if output_dtypes else None,
+                input_aliasing=op_spec.get("input_aliasing", {}),
+                output_aliasing=op_spec.get("output_aliasing", {}),
+                model=inline_model,
+            )
         for name, value in outputs.items():
             tensors[name] = value
 
@@ -581,29 +949,58 @@ def _execute_operator(
                 tensors[output_names[0]] = result
 
     elif op_type == EOperatorType.SWITCH_GLTF_RENDER_STATUS:
-        if input_tensors:
-            pose = input_tensors[1] if len(input_tensors) >= 2 else None
-            ops_module.switch_gltf_render_status(input_tensors[0], pose=pose)
+        gltf_name = op_spec.get("gltf") or (input_refs[0] if input_refs else None)
+        gltf = tensors.get(_resolve_tensor_name(gltf_name)) if gltf_name is not None else None
+        if gltf is not None:
+            # Older hand-authored specs used input position 1 for pose.  Do
+            # not apply that fallback when named dynamic status fields are
+            # present, otherwise a visible/view_locked tensor is mistaken for
+            # pose.
+            pose_index = 1 if not any(
+                field in op_spec for field in ("view_locked", "visible")
+            ) else None
+            ops_module.switch_gltf_render_status(
+                gltf,
+                pose=named_or_value("pose", pose_index),
+                view_locked=named_or_value("view_locked"),
+                visible=named_or_value("visible"),
+            )
 
     elif op_type == EOperatorType.UPDATE_GLTF:
-        update_type = ""
-        attrs = op_spec.get("attrs", [])
-        if attrs:
-            update_type = str(attrs[0])
-        if input_tensors:
-            ops_module.update_gltf(input_tensors[0], update_type=update_type)
+        update_type = str(op_spec.get("attribute") or op_spec.get("update_type") or "")
+        if not update_type:
+            attrs = op_spec.get("attrs", [])
+            if attrs:
+                update_type = str(attrs[0])
+        gltf_name = op_spec.get("gltf") or (input_refs[0] if input_refs else None)
+        gltf = tensors.get(_resolve_tensor_name(gltf_name)) if gltf_name is not None else None
+        if gltf is not None:
+            ops_module.update_gltf(
+                gltf,
+                update_type=update_type,
+                values=first_tensor(named_tensor("texture_src", 1), named_tensor("value", 1), named_tensor("pose", 1), named_tensor("transform", 1)),
+                ids=first_tensor(named_tensor("texture_id", 2), named_tensor("node_id", 2), named_tensor("material_id", 2)),
+            )
 
     elif op_type == EOperatorType.RENDER_TEXT:
-        if input_tensors:
+        gltf_name = op_spec.get("gltf") or (input_refs[0] if input_refs else None)
+        gltf = tensors.get(_resolve_tensor_name(gltf_name)) if gltf_name is not None else None
+        if gltf is not None:
             attrs = op_spec.get("attrs", [])
-            text = attrs[1] if len(attrs) > 1 else ""
             config = attrs[0] if attrs else "bold#en-us#512#64"
             parts = config.split("#")
-            typeface = parts[0] if parts else "bold"
-            language = parts[1] if len(parts) > 1 else "en-us"
-            width = int(parts[2]) if len(parts) > 2 else 512
-            height = int(parts[3]) if len(parts) > 3 else 64
-            ops_module.render_text(input_tensors[0], text, language, width, height, typeface=typeface)
+            text = op_spec.get("text", attrs[1] if len(attrs) > 1 else "")
+            typeface = op_spec.get("typeface", parts[0] if parts else "bold")
+            language = op_spec.get("language_and_locale", parts[1] if len(parts) > 1 else "en-us")
+            width = int(op_spec.get("canvas_width", parts[2] if len(parts) > 2 else 512))
+            height = int(op_spec.get("canvas_height", parts[3] if len(parts) > 3 else 64))
+            ops_module.render_text(
+                gltf, text, language, width, height, typeface=typeface,
+                start_position=named_tensor("start", 1),
+                colors=named_tensor("colors", 2),
+                texture_id=named_tensor("texture_id", 3),
+                font_size=named_tensor("font_size", 4),
+            )
 
     elif _OP_JAVASCRIPT is not None and op_type == _OP_JAVASCRIPT:
         js_code = op_spec.get("script") or op_spec.get("attrs", [""])[0]
@@ -618,9 +1015,53 @@ def _execute_operator(
                 name = _resolve_tensor_name(ref)
                 if name and name in tensors:
                     inputs_map[name] = tensors[name]
-        outputs = ops_module.javascript(js_code, inputs_map, output_names)
+        outputs = _try_execute_known_javascript(js_code, inputs_map, output_names)
+        if outputs is None:
+            outputs = ops_module.javascript(js_code, inputs_map, output_names)
         for name, value in outputs.items():
             tensors[name] = value
+
+    elif op_type == EOperatorType.SCENEGRAPH_VISIBILITY:
+        if input_tensors:
+            attrs = op_spec.get("attrs", [])
+            visible = op_spec.get("visible", attrs[0] if attrs else True)
+            if isinstance(visible, str) and visible in tensors:
+                visible = tensors[visible]
+            if isinstance(visible, str):
+                visible = visible.strip().lower() not in {"0", "false", "no", "off"}
+            result = ops_module.scenegraph_visibility(input_tensors[0], visible=visible)
+            if output_names:
+                tensors[output_names[0]] = result
+
+    elif op_type == EOperatorType.UPDATE_COMPONENT:
+        if len(input_tensors) < 2:
+            raise ValueError("update_component requires scenegraph and data tensors")
+        entity_path = op_spec.get("entity_path", op_spec.get("entityPath"))
+        property_name = op_spec.get("property", op_spec.get("target_property"))
+        if not entity_path or not property_name:
+            raise ValueError("update_component requires entity_path and property")
+        ops_module.update_component(
+            input_tensors[0],
+            input_tensors[1],
+            entity_path=str(entity_path),
+            property=str(property_name),
+        )
+
+    elif op_type == EOperatorType.MICROPHONE:
+        shape = get_output_shape(output_names[0] if output_names else None) or (1,)
+        result = ops_module.microphone(output_shape=shape)
+        if output_names:
+            tensors[output_names[0]] = result
+
+    elif op_type == EOperatorType.SPEAKER:
+        if input_tensors:
+            ops_module.speaker(input_tensors[0])
+
+    elif op_type == EOperatorType.DEPTH:
+        shape = get_output_shape(output_names[0] if output_names else None) or (1, 1)
+        result = ops_module.depth(output_shape=shape)
+        if output_names:
+            tensors[output_names[0]] = result
 
     elif op_type == EOperatorType.UNKNOWN:
         if input_tensors:
@@ -634,89 +1075,118 @@ def _execute_operator(
         )
 
 
+def _try_execute_known_javascript(
+    js_code: str,
+    inputs: Dict[str, np.ndarray],
+    output_names: List[str],
+) -> Optional[Dict[str, np.ndarray]]:
+    if (
+        "decodeDetection" in js_code
+        and "anchorFor" in js_code
+        and {"box_coords_1", "box_coords_2", "box_scores_1", "box_scores_2"}.issubset(inputs)
+        and output_names == ["post_det"]
+    ):
+        return {"post_det": _decode_mediapipe_face_detection(inputs)}
+    return None
+
+
+def _decode_mediapipe_face_detection(inputs: Dict[str, np.ndarray]) -> np.ndarray:
+    box_coords_1 = np.asarray(inputs["box_coords_1"], dtype=np.float32).reshape(-1)
+    box_coords_2 = np.asarray(inputs["box_coords_2"], dtype=np.float32).reshape(-1)
+    box_scores_1 = np.asarray(inputs["box_scores_1"], dtype=np.float32).reshape(-1)
+    box_scores_2 = np.asarray(inputs["box_scores_2"], dtype=np.float32).reshape(-1)
+    template = np.asarray(inputs.get("post_det_template", np.zeros((1, 21), dtype=np.float32)), dtype=np.float32)
+    post_det = template.reshape(-1).copy()
+    if post_det.size < 21:
+        padded = np.zeros(21, dtype=np.float32)
+        padded[: post_det.size] = post_det
+        post_det = padded
+    else:
+        post_det = post_det[:21]
+
+    input_size = 256.0
+    camera_width = 580.0
+    camera_height = 326.0
+    affine_scale_x = 0.4413793087
+    affine_scale_y = 0.7852760736
+    affine_x_offset = 0.0
+    affine_y_offset = 0.0
+    score_threshold = 0.25
+
+    def sigmoid(value: float) -> float:
+        return float(1.0 / (1.0 + np.exp(-float(value))))
+
+    best_score = 0.0
+    best_index = -1
+    best_head = 0
+    for index in range(min(512, box_scores_1.size)):
+        score = sigmoid(box_scores_1[index])
+        if score > best_score:
+            best_score = score
+            best_index = index
+            best_head = 1
+    for index in range(min(384, box_scores_2.size)):
+        score = sigmoid(box_scores_2[index])
+        if score > best_score:
+            best_score = score
+            best_index = index
+            best_head = 2
+
+    if best_score <= score_threshold or best_index < 0:
+        return post_det.reshape(1, 21)
+
+    coords = box_coords_1 if best_head == 1 else box_coords_2
+    feature_size = 16 if best_head == 1 else 8
+    anchors_per_cell = 2 if best_head == 1 else 6
+    cell = best_index // anchors_per_cell
+    col = cell % feature_size
+    row = cell // feature_size
+    anchor_x = (col + 0.5) / feature_size
+    anchor_y = (row + 0.5) / feature_size
+
+    def to_camera_x(value: float) -> float:
+        return float(np.clip((value - affine_x_offset) / affine_scale_x, 0.0, camera_width))
+
+    def to_camera_y(value: float) -> float:
+        return float(np.clip((value - affine_y_offset) / affine_scale_y, 0.0, camera_height))
+
+    base = best_index * 16
+    if base + 14 > coords.size:
+        return post_det.reshape(1, 21)
+
+    x_center = (coords[base] / input_size + anchor_x) * input_size
+    y_center = (coords[base + 1] / input_size + anchor_y) * input_size
+    box_w = coords[base + 2]
+    box_h = coords[base + 3]
+
+    post_det[0] = to_camera_x(x_center - box_w * 0.5)
+    post_det[1] = to_camera_y(y_center - box_h * 0.5)
+    post_det[2] = to_camera_x(x_center + box_w * 0.5)
+    post_det[3] = to_camera_y(y_center + box_h * 0.5)
+    post_det[4] = best_score
+    post_det[5] = 0.0
+
+    for keypoint in range(5):
+        coord_base = base + 4 + keypoint * 2
+        out_base = 6 + keypoint * 3
+        keypoint_x = (coords[coord_base] / input_size + anchor_x) * input_size
+        keypoint_y = (coords[coord_base + 1] / input_size + anchor_y) * input_size
+        post_det[out_base] = to_camera_x(keypoint_x)
+        post_det[out_base + 1] = to_camera_y(keypoint_y)
+        post_det[out_base + 2] = best_score
+
+    return post_det.astype(np.float32).reshape(1, 21)
+
 def _run_device_pipeline(
-    pipeline_path: Union[str, Path],
+    pipeline_path: Path,
     inputs: Dict[str, np.ndarray],
     input_tensor_name: str,
-    duration: int = 30,
+    duration: int,
     expected_outputs: Optional[Dict[str, np.ndarray]] = None,
 ) -> Optional[Dict[str, np.ndarray]]:
-    """Run pipeline on device using pipeline-inspect.
-
-    Args:
-        pipeline_path: Path to pipeline JSON file.
-        inputs: Dictionary of input tensors.
-        input_tensor_name: Name of the input tensor to inject.
-        duration: Duration to run the pipeline in seconds.
-        expected_outputs: Optional dictionary of expected outputs to determine dtypes.
-
-    Returns:
-        Dictionary of output tensors, or None if device execution failed.
-    """
-    import subprocess
-    import glob
-
-    # Save input to binary file
-    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
-        input_bin_path = f.name
-        input_tensor = inputs[input_tensor_name]
-        input_tensor.tofile(f)
-
-    try:
-        # Run pipeline-inspect
-        cmd = [
-            "python", "-m", "securemr.inspect.pipeline_cli",
-            "--pipeline", str(pipeline_path),
-            "--input", input_bin_path,
-            "--input-tensor", input_tensor_name,
-            "--duration", str(duration),
-            "--force-install-apk",
-        ]
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=duration + 60,
-        )
-
-        if result.returncode != 0:
-            print(f"Device execution failed: {result.stderr}")
-            return None
-
-        # Find output files
-        output_dir = Path("tmp_data")
-        output_dirs = sorted(output_dir.glob("pipeline_inspect_outputs_*"))
-        if not output_dirs:
-            print("No output directory found")
-            return None
-
-        latest_output_dir = output_dirs[-1]
-        outputs = {}
-
-        for output_file in latest_output_dir.glob("pipeline_inspect_output_*.bin"):
-            # Extract tensor name from filename
-            name = output_file.stem.replace("pipeline_inspect_output_", "")
-
-            # Determine dtype from expected outputs if available
-            dtype = np.float32
-            if expected_outputs and name in expected_outputs:
-                dtype = expected_outputs[name].dtype
-
-            data = np.fromfile(output_file, dtype=dtype)
-            outputs[name] = data
-
-        return outputs if outputs else None
-
-    except subprocess.TimeoutExpired:
-        print("Device execution timed out")
-        return None
-    except Exception as e:
-        print(f"Device execution error: {e}")
-        return None
-    finally:
-        os.unlink(input_bin_path)
-
+    """Device verification is not available from the Python verifier."""
+    print("Device verification is not available from the Python verifier. Use pyspatialml run device.")
+    return None
 
 def verify(
     pipeline: Union[str, Path, Dict[str, Any]],
@@ -785,24 +1255,6 @@ def verify(
         cleanup_pipeline = False
 
     try:
-        def _maybe_copy_model_files(spec_path: Path) -> None:
-            try:
-                with open(spec_path, "r", encoding="utf-8") as f:
-                    spec = json.load(f)
-            except Exception:
-                return
-            operators = spec.get("operators", [])
-            for op_spec in operators:
-                host_path = op_spec.get("model_file_host")
-                if host_path and os.path.exists(host_path):
-                    target = spec_path.parent / Path(host_path).name
-                    if not target.exists():
-                        try:
-                            with open(host_path, "rb") as src, open(target, "wb") as dst:
-                                dst.write(src.read())
-                        except Exception:
-                            pass
-
         # Run on host (optionally force model inference to use device backend for parity)
         prev_target = os.getenv("PY2SMR_MODEL_INFERENCE_TARGET")
         if device:
@@ -832,8 +1284,6 @@ def verify(
                     pipeline_path, input_tensor_name, inputs
                 )
                 cleanup_device_pipeline = True
-            _maybe_copy_model_files(device_pipeline_path)
-
             device_outputs = _run_device_pipeline(
                 device_pipeline_path, inputs, input_tensor_name, duration,
                 expected_outputs=host_outputs,
@@ -846,7 +1296,7 @@ def verify(
                 return VerificationResult(
                     success=False,
                     host_outputs=host_outputs,
-                    error_message="Device execution failed",
+                    error_message="Device verification is not available",
                 )
 
             # Compare host and device outputs
